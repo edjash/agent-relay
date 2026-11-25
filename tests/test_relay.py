@@ -19,6 +19,8 @@ def test_task_starts_a_session_and_replies(harness: Harness) -> None:
     assert harness.launcher.commands == [["/usr/bin/claude", prompt]]
     assert harness.replies == [f"Started claude in {folder}"]
     reply = FakeSMTP.sent[0]
+    assert reply["From"] == "AgentRelay <owner@example.com>"
+    assert reply.get_content().startswith(f"AgentRelay Message: Started claude in {folder}")
     assert reply["To"] == "owner@example.com"
     assert reply["Subject"] == "Re: claude: summarise the report"
     assert reply["In-Reply-To"] == "<m1@example.com>"
@@ -52,7 +54,7 @@ def test_closing_a_session_replies_with_files_and_starts_the_next(harness: Harne
     harness.launcher.end_session()
     harness.cycle()
 
-    closed = next(m for m in FakeSMTP.sent if m.get_content().startswith("Session closed"))
+    closed = next(m for m in FakeSMTP.sent if "Session closed" in m.get_content())
     assert closed["Subject"] == "Re: claude: first"
     assert "  report.md" in closed.get_content()
     assert "settings.json" not in closed.get_content()

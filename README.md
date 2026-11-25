@@ -36,7 +36,7 @@ It uses only the Python standard library.
 **Triggering**: the subject must start with `claude:` or `codex:` (any case). The rest of the subject and the
 plain-text body become the prompt. Attachments are never downloaded.
 
-**Replies** go back in the same thread, always to the verified sender (never a claimed `Reply-To`), and carry
+**Replies** go back in the same thread, shown as from "AgentRelay" and starting "AgentRelay Message:", always to the verified sender (never a claimed `Reply-To`), and carry
 an `X-Agent-Relay` header so a reply can never trigger a session. At most 30 replies are sent in any 24 hours;
 the 30th says the limit was reached.
 
