@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -31,6 +32,7 @@ from agent_relay.sessions import (
     build_command,
     hook_args,
     list_files,
+    nothing_created,
     with_pid_file,
 )
 from agent_relay.state import State, Task
@@ -357,6 +359,8 @@ class Relay:
             if len(last) > MAX_LAST_MESSAGE:
                 last = last[:MAX_LAST_MESSAGE].rstrip() + "\n[...cut short]"
             text += f"\n\nLast message from {r.task.tool}:\n\n{last}"
+        if nothing_created(r.folder):
+            return text + "\n\nNo files were created, so the session folder has been removed."
         files, more = list_files(r.folder, MAX_FILES_LISTED)
         listing = "\n".join(f"  {f}" for f in files) or "  (no files)"
         if more:
@@ -404,6 +408,10 @@ class Relay:
         self.running = None
         self.state.listener["running"] = None
         self.state.save()
+        self._reply_closed(r)
+        self._remove_if_empty(r)
+
+    def _reply_closed(self, r: RunningSession) -> None:
         if r.phase in ("abandoned", "finished"):
             return  # AgentRelay closed it and has already replied
         if r.phase == "starting":
@@ -413,6 +421,16 @@ class Relay:
         took = duration(time.time() - r.started)
         log.info("Session closed after %s", took)
         self.replier.reply(r.task, f"Session closed after {took}.{self._summary(r, r.read_stop())}")
+
+    def _remove_if_empty(self, r: RunningSession) -> None:
+        """Delete a closed session's folder if the agent created nothing in it,
+        so empty folders don't pile up. The conversation itself is kept by the
+        agent and can still be resumed."""
+        folder = r.folder
+        if folder.parent != self.launcher.sessions_dir or not nothing_created(folder):
+            return
+        shutil.rmtree(folder, ignore_errors=True)
+        log.info("  Removed the empty session folder %s", folder)
 
     def wait_fds(self) -> list[int]:
         """What should wake the listener: the session window closing, or one of

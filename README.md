@@ -38,8 +38,9 @@ It uses only the Python standard library.
 Sessions are meant to run unattended, so AgentRelay closes them itself. Each agent gets hooks that report
 when it takes the prompt, uses a tool and finishes its turn. Claude also reports background tasks it left
 running (a build, a test run): the session stays open until they end and Claude finishes again. Codex reports
-none, so a Codex session closes when its turn ends. To carry on with a closed session, run `claude --continue`
-or `codex resume` in its folder.
+none, so a Codex session closes when its turn ends. A closed session whose agent created no files has its
+folder removed, so empty folders don't pile up; the conversation is kept by the agent and can still be resumed.
+To carry on with a closed session, run `claude --continue` or `codex resume` in its folder.
 
 **Triggering**: the subject must start with `claude:` or `codex:` (any case). The rest of the subject and the
 plain-text body become the prompt. Attachments are never downloaded.

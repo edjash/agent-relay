@@ -323,3 +323,39 @@ def test_durations_read_naturally() -> None:
     assert [duration(s) for s in (0, 10.7, 59, 60, 754, 3600, 7500)] == [
         "0 sec", "10 sec", "59 sec", "1 min", "12 min", "1 h", "2 h 5 min",
     ]  # fmt: skip
+
+
+def test_empty_session_folders_are_removed_when_closed(harness: Harness) -> None:
+    harness.mailbox.add("claude: answer a question", "what is 2+2?")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    harness.launcher.agent_finishes("4")
+    harness.cycle()
+    assert harness.full_replies[-1].endswith("No files were created, so the session folder has been removed.")
+    harness.cycle()
+    assert not r.folder.exists()
+
+
+def test_session_folders_with_files_are_kept(harness: Harness) -> None:
+    harness.mailbox.add("claude: write it", "please")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    (r.folder / ".git").mkdir()  # even a hidden folder the agent made counts
+    harness.launcher.agent_finishes("done")
+    harness.cycle()
+    harness.cycle()
+    assert r.folder.exists()
+
+
+def test_folder_of_a_session_that_never_started_is_removed(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.mailbox.add("claude: x", "y")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    r.started -= 181
+    harness.cycle()
+    harness.cycle()
+    assert not r.folder.exists()

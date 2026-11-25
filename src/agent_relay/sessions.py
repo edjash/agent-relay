@@ -153,6 +153,14 @@ def list_files(folder: Path, limit: int) -> tuple[list[str], int]:
     return files[:limit], max(0, len(files) - limit)
 
 
+def nothing_created(folder: Path) -> bool:
+    """True if the session folder holds only what AgentRelay put there."""
+    try:
+        return all(p.name in (PROMPT_FILE, RELAY_DIR) for p in folder.iterdir())
+    except OSError:
+        return False
+
+
 class Launcher:
     """Starts sessions for the relay. Tests replace this with a fake."""
 
