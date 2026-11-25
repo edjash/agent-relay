@@ -51,9 +51,9 @@ def test_codex_gets_a_trusted_prompt_hook(harness: Harness) -> None:
     harness.cycle()
     cmd = harness.launcher.commands[0]
     assert "--dangerously-bypass-hook-trust" in cmd
-    assert "features.codex_hooks=true" in cmd
     hook = next(a for a in cmd if a.startswith("hooks.UserPromptSubmit="))
     assert hook.endswith('/.agent-relay/started"}]}]')
+    assert not any("codex_hooks" in a for a in cmd)  # deprecated; hooks are on by default
 
 
 def test_session_that_never_takes_its_prompt_is_closed(harness: Harness) -> None:
@@ -256,3 +256,70 @@ def test_dry_run_starts_sends_and_saves_nothing(harness: Harness) -> None:
     assert harness.relay.running is None
     assert FakeSMTP.sent == []
     assert not harness.state.path.exists()
+
+
+def test_stuck_session_reply_includes_its_screen(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.launcher.screen = "\n".join(f"line {i}" for i in range(100)) + "\nPlease log in: /login"
+    harness.mailbox.add("claude: x", "y")
+    harness.cycle()
+    assert harness.relay.running is not None
+    harness.relay.running.started -= 181
+    harness.cycle()
+    reply = harness.full_replies[-1]
+    assert reply.startswith("Didn't start")
+    assert reply.endswith("line 99\nPlease log in: /login")
+    assert "line 40\n" not in reply  # only the last 60 lines
+
+
+def test_finished_agent_is_closed_with_its_last_message(harness: Harness) -> None:
+    harness.mailbox.add("claude: write it", "please")
+    harness.mailbox.add("codex: next one", "please")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    (r.folder / "notes.md").write_text("x")
+    harness.launcher.agent_works()
+    harness.cycle()
+    assert r.phase == "running"  # working, no finished hook yet
+
+    harness.launcher.agent_finishes("All done: wrote notes.md")
+    harness.cycle()
+    assert r.phase == "finished" and r.proc.poll() is not None
+    finished = next(x for x in harness.full_replies if x.startswith("Finished"))
+    assert "Last message from claude:\n\nAll done: wrote notes.md" in finished
+    assert "notes.md" in finished.split("Files in")[1]
+    harness.cycle()  # the window has closed: the next task starts, with no "Session closed" reply
+    assert not any(x.startswith("Session closed") for x in harness.replies)
+    assert harness.relay.running is not None and harness.relay.running.task.tool == "codex"
+
+
+def test_claude_background_tasks_come_from_its_hook(harness: Harness) -> None:
+    harness.mailbox.add("claude: x", "y")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    harness.launcher.agent_finishes("Waiting on tests", background_tasks=[{"id": "b1"}])
+    harness.cycle()
+    assert r.phase == "running"
+    harness.launcher.agent_finishes("Tests passed", background_tasks=[])
+    harness.cycle()
+    assert r.phase == "finished"
+
+
+def test_closing_the_window_mid_task_reports_the_last_message(harness: Harness) -> None:
+    harness.mailbox.add("claude: x", "y")
+    harness.cycle()
+    harness.launcher.agent_finishes("Half way", background_tasks=[{"id": "b1"}])
+    harness.cycle()
+    harness.launcher.end_session()
+    harness.cycle()
+    assert harness.full_replies[-1].startswith("Session closed after 0 sec.\n\nLast message from claude:\n\nHalf way")
+
+
+def test_durations_read_naturally() -> None:
+    from agent_relay.relay import duration
+
+    assert [duration(s) for s in (0, 10.7, 59, 60, 754, 3600, 7500)] == [
+        "0 sec", "10 sec", "59 sec", "1 min", "12 min", "1 h", "2 h 5 min",
+    ]  # fmt: skip

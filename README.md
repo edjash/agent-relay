@@ -30,9 +30,16 @@ It uses only the Python standard library.
 | the same task again within an hour | ignored | no |
 | accepted while a session is running | queued | queue position |
 | accepted and started | session opens; "started" once the agent takes the prompt | "started", with the folder |
-| stuck at start (no prompt taken in 3 minutes: login, update, other dialog) | window closed, next task starts | "didn't start" |
+| stuck at start (no prompt taken in 3 minutes: login, update, other dialog) | window closed, next task starts | "didn't start", with its screen |
 | failed to start | dropped | the reason |
-| finished (window closed) | next task starts | files left in the folder |
+| finished (agent's turn over; for Claude, no background tasks left) | window closed, next task starts | "finished", with the agent's last message and the files |
+| closed by you | next task starts | "session closed", with the same |
+
+Sessions are meant to run unattended, so AgentRelay closes them itself. Each agent gets hooks that report
+when it takes the prompt, uses a tool and finishes its turn. Claude also reports background tasks it left
+running (a build, a test run): the session stays open until they end and Claude finishes again. Codex reports
+none, so a Codex session closes when its turn ends. To carry on with a closed session, run `claude --continue`
+or `codex resume` in its folder.
 
 **Triggering**: the subject must start with `claude:` or `codex:` (any case). The rest of the subject and the
 plain-text body become the prompt. Attachments are never downloaded.
@@ -58,6 +65,8 @@ do anything your user account can. The sender check above is what keeps that saf
 
 Requires Linux, Python 3.11+, a desktop session (sessions open terminal windows; GNOME Terminal preferred,
 falling back to `x-terminal-emulator` or `xterm`), and `claude` and/or `codex` on your `PATH`.
+`tmux` is recommended: sessions then run inside it (status bar hidden), so AgentRelay can include a stuck
+session's screen in its reply and close windows cleanly.
 
 ```bash
 git clone https://github.com/edjash/agent-relay.git ~/Projects/agent-relay && cd ~/Projects/agent-relay
@@ -156,7 +165,8 @@ State (handled emails, queue, reply count) lives in `~/.local/state/agent-relay/
 - If the listener is restarted while a session window is open, it doesn't know about that session and may
   start the next task alongside it.
 - It needs you logged in to a desktop session to open terminal windows.
-- It replies about sessions, but can't report what the agent did beyond the files it left.
+- An agent that ends its turn with a question counts as finished: the session closes, and the question is in
+  the "finished" reply. Answer it by resuming the session in its folder.
 
 ## Development
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import imaplib
+import json
 import logging
 import os
 import re
@@ -20,14 +21,16 @@ from agent_relay.config import Config
 from agent_relay.gmail import REPLY_HEADER, Fetched, Gmail
 from agent_relay.replies import Replier
 from agent_relay.sessions import (
+    ACTIVE_MARKER,
     PID_FILE,
     PROMPT_FILE,
     RELAY_DIR,
     STARTED_MARKER,
+    STOP_FILE,
     Launcher,
     build_command,
+    hook_args,
     list_files,
-    started_hook_args,
     with_pid_file,
 )
 from agent_relay.state import State, Task
@@ -56,8 +59,12 @@ GMAIL_BACKOFF_MARKERS = (
 )
 # Login errors that won't fix themselves: stop instead of retrying.
 LOGIN_FAILURE_MARKERS = ("AUTHENTICATIONFAILED", "Invalid credentials", "Application-specific password required")
-# Most files listed in a "session closed" reply.
+# Most files listed in a "finished" or "session closed" reply.
 MAX_FILES_LISTED = 30
+# The agent's last message in a closing reply is cut to this many characters,
+# and a stuck session's screen to this many lines.
+MAX_LAST_MESSAGE = 4000
+MAX_SCREEN_LINES = 60
 
 # Exit codes. EXIT_NO_RESTART tells systemd not to restart (see the service unit).
 EXIT_OK, EXIT_ERROR, EXIT_NO_RESTART = 0, 1, 2
@@ -84,14 +91,52 @@ class RunningSession:
     folder: Path
     task: Task
     started: float
-    watch: FolderWatch | None  # wakes the listener when the started marker appears
-    # "starting" until the agent takes its prompt, then "running"; "abandoned"
-    # once AgentRelay has given up on it and closed it.
+    watch: FolderWatch | None  # wakes the listener when one of the agent's hooks reports
+    # "starting" until the agent takes its prompt, then "running"; "finished" or
+    # "abandoned" once AgentRelay has closed it.
     phase: str = "starting"
+    waiting_logged: float = 0.0  # the finished-turn time already logged as waiting on background work
 
     @property
     def relay_dir(self) -> Path:
         return self.folder / RELAY_DIR
+
+    def agent_pid(self) -> int | None:
+        try:
+            return int((self.relay_dir / PID_FILE).read_text())
+        except (OSError, ValueError):
+            return None
+
+    def read_stop(self) -> dict[str, object]:
+        """What the agent's "finished turn" hook received (last message etc.)."""
+        try:
+            data = json.loads((self.relay_dir / STOP_FILE).read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+
+def duration(seconds: float) -> str:
+    """45 sec, 12 min, 2 h 5 min."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s} sec"
+    if s < 3600:
+        return f"{s // 60} min"
+    h, m = divmod(s // 60, 60)
+    return f"{h} h {m} min" if m else f"{h} h"
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _last_lines(text: str, n: int) -> str:
+    lines = text.splitlines()
+    return "\n".join(lines[-n:])
 
 
 class Relay:
@@ -221,7 +266,7 @@ class Relay:
             (folder / PROMPT_FILE).write_text(task.prompt + "\n")
             relay_dir = folder / RELAY_DIR
             relay_dir.mkdir()
-            extra = (*self.cfg.tool_args.get(task.tool, ()), *started_hook_args(task.tool, relay_dir / STARTED_MARKER))
+            extra = (*self.cfg.tool_args.get(task.tool, ()), *hook_args(task.tool, relay_dir))
             cmd = with_pid_file(build_command(exe, task.tool, extra, task.prompt), relay_dir / PID_FILE)
             watch = FolderWatch(relay_dir)
             proc = self.launcher.open(folder, cmd)
@@ -243,17 +288,16 @@ class Relay:
             self.check_started()  # in case it was already quick
 
     def check_started(self) -> None:
-        """Send "Started" once the agent's hook creates the marker. If it hasn't
-        within the start timeout, the agent is stuck on something (a login, an
-        update, some other prompt): close it, say so, and move on."""
+        """Send "Started" once the agent's prompt hook fires. If it hasn't within
+        the start timeout, the agent is stuck on something (a login, an update,
+        some other prompt): grab its screen, close it, say so, and move on."""
         r = self.running
         if r is None or r.phase != "starting":
             return
         if r.watch:
             r.watch.drain()
         if (r.relay_dir / STARTED_MARKER).exists():
-            r.phase = "running"
-            self._stop_watching(r)
+            self._set_phase(r, "running")
             log.info("  %s took the prompt", r.task.tool)
             self.replier.reply(
                 r.task, f"Started {r.task.tool} in {r.folder}\nThe prompt is saved there as {PROMPT_FILE}."
@@ -262,34 +306,79 @@ class Relay:
         timeout = self.limits.start_timeout.total_seconds()
         if time.time() - r.started < timeout:
             return
-        r.phase = "abandoned"
-        self._stop_watching(r)
         if r.task.hash:  # so the same task can be sent again straight away
             self.state.recent.pop(r.task.hash, None)
         minutes = int(timeout // 60)
         log.warning("  %s didn't take the prompt within %d min; closing it", r.task.tool, minutes)
+        screen = self.launcher.capture(r.folder)
+        self._set_phase(r, "abandoned")
         self._close_agent(r)
-        self.replier.reply(
-            r.task,
+        text = (
             f"Didn't start: {r.task.tool} hadn't taken the prompt after {minutes} min, so AgentRelay closed it.\n\n"
             f"It was probably waiting on a login, an update or another prompt; run {r.task.tool} by hand to see. "
-            "Send the task again to retry, with 'claude:' or 'codex:'.",
+            "Send the task again to retry, with 'claude:' or 'codex:'."
         )
+        if screen:
+            text += f"\n\nIts screen when it was closed:\n\n{_last_lines(screen, MAX_SCREEN_LINES)}"
+        self.replier.reply(r.task, text)
 
-    def _stop_watching(self, r: RunningSession) -> None:
+    def check_finished(self) -> None:
+        """Close the session once the agent has finished: its "finished turn" hook
+        fired after its last activity, with no background tasks left. (Claude
+        lists its background tasks in that hook and starts a new turn when they
+        end. Codex reports none, so for Codex the hook alone counts.)"""
+        r = self.running
+        if r is None or r.phase != "running":
+            return
         if r.watch:
+            r.watch.drain()
+        stopped_at = _mtime(r.relay_dir / STOP_FILE)
+        if stopped_at <= max(_mtime(r.relay_dir / STARTED_MARKER), _mtime(r.relay_dir / ACTIVE_MARKER)):
+            return  # still working, or hasn't finished a turn yet
+        stop = r.read_stop()
+        tasks = stop.get("background_tasks")
+        if isinstance(tasks, list) and tasks:
+            if r.waiting_logged != stopped_at:
+                r.waiting_logged = stopped_at
+                log.info("  %s finished its turn with %d background task(s) running; waiting", r.task.tool, len(tasks))
+            return
+        took = duration(time.time() - r.started)
+        log.info("  %s finished after %s; closing it", r.task.tool, took)
+        self._set_phase(r, "finished")
+        self._close_agent(r)
+        self.replier.reply(r.task, f"Finished after {took}.{self._summary(r, stop)}")
+
+    def _summary(self, r: RunningSession, stop: dict[str, object]) -> str:
+        """The agent's last message and the files it left, for a closing reply."""
+        text = ""
+        last = stop.get("last_assistant_message")
+        if isinstance(last, str) and last.strip():
+            last = last.strip()
+            if len(last) > MAX_LAST_MESSAGE:
+                last = last[:MAX_LAST_MESSAGE].rstrip() + "\n[...cut short]"
+            text += f"\n\nLast message from {r.task.tool}:\n\n{last}"
+        files, more = list_files(r.folder, MAX_FILES_LISTED)
+        listing = "\n".join(f"  {f}" for f in files) or "  (no files)"
+        if more:
+            listing += f"\n  ...and {more} more"
+        return text + f"\n\nFiles in {r.folder}:\n{listing}"
+
+    def _set_phase(self, r: RunningSession, phase: str) -> None:
+        r.phase = phase
+        if phase in ("abandoned", "finished") and r.watch:
             r.watch.close()
             r.watch = None
         if self.state.listener.get("running"):
-            self.state.listener["running"]["phase"] = r.phase
+            self.state.listener["running"]["phase"] = phase
         self.state.save()
 
     def _close_agent(self, r: RunningSession) -> None:
-        """Stop the agent, which closes its terminal window. Falls back to the
-        terminal process if the agent's process ID was never written."""
-        try:
-            pid = int((r.relay_dir / PID_FILE).read_text())
-        except (OSError, ValueError):
+        """Close the session's window: through tmux, else by stopping the agent
+        (recorded process ID), else by stopping the terminal process."""
+        if self.launcher.close(r.folder):
+            return
+        pid = r.agent_pid()
+        if pid is None:
             log.warning("  No agent process ID recorded; closing the terminal process instead")
             r.proc.terminate()
             return
@@ -315,23 +404,19 @@ class Relay:
         self.running = None
         self.state.listener["running"] = None
         self.state.save()
-        if r.phase == "abandoned":
-            return  # already replied "Didn't start"
+        if r.phase in ("abandoned", "finished"):
+            return  # AgentRelay closed it and has already replied
         if r.phase == "starting":
             log.info("Session closed before it took the prompt")
             self.replier.reply(r.task, f"Closed before {r.task.tool} took the prompt; nothing ran.")
             return
-        minutes = int((time.time() - r.started) // 60)
-        files, more = list_files(r.folder, MAX_FILES_LISTED)
-        listing = "\n".join(f"  {f}" for f in files) or "  (no files)"
-        if more:
-            listing += f"\n  ...and {more} more"
-        log.info("Session closed after %d min", minutes)
-        self.replier.reply(r.task, f"Session closed after {minutes} min.\n\nFiles in {r.folder}:\n{listing}")
+        took = duration(time.time() - r.started)
+        log.info("Session closed after %s", took)
+        self.replier.reply(r.task, f"Session closed after {took}.{self._summary(r, r.read_stop())}")
 
     def wait_fds(self) -> list[int]:
-        """What should wake the listener: the session window closing, or the
-        started marker appearing."""
+        """What should wake the listener: the session window closing, or one of
+        the agent's hooks reporting."""
         r = self.running
         if r is None:
             return []
@@ -340,10 +425,12 @@ class Relay:
     def wait_seconds(self, longest: float) -> float:
         """How long the listener may sleep: no later than the start deadline."""
         r = self.running
-        if r is None or r.phase != "starting":
+        if r is None:
             return longest
-        deadline = r.started + self.limits.start_timeout.total_seconds()
-        return max(1.0, min(longest, deadline - time.time() + 0.5))
+        if r.phase == "starting":
+            deadline = r.started + self.limits.start_timeout.total_seconds()
+            return max(1.0, min(longest, deadline - time.time() + 0.5))
+        return longest
 
     # ---- listener bookkeeping for `agent-relay status`
 
@@ -388,12 +475,13 @@ def run(
                     while True:
                         relay.finish_session_if_closed()
                         relay.check_started()
+                        relay.check_finished()
                         relay.check_mail(gmail)
                         relay.start_next()
                         if once:
                             return EXIT_OK
-                        # Sleep until Gmail reports new mail, the session starts or closes,
-                        # the start deadline passes, or it's time to refresh.
+                        # Sleep until Gmail reports new mail, an agent hook reports, the
+                        # session closes, a session check is due, or it's time to refresh.
                         gmail.idle_wait(relay.wait_seconds(IDLE_SECONDS), relay.wait_fds())
             except imaplib.IMAP4.error as e:
                 login_failed, gmail_said_back_off = _backoff_messages(e)

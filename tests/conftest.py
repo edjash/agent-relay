@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import imaplib
 import itertools
+import json
+import os
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -114,6 +116,8 @@ class FakeLauncher(Launcher):
         super().__init__(sessions_dir)
         self.tool_installed = tool_installed
         self.auto_start = True  # the agent takes its prompt as soon as it opens
+        self.screen: str | None = None  # what capture() returns
+        self._clock = time.time()  # hook files get strictly increasing times
         self.procs: list[subprocess.Popen[bytes]] = []
         self.commands: list[list[str]] = []
         self._n = itertools.count()
@@ -128,16 +132,37 @@ class FakeLauncher(Launcher):
 
     def open(self, folder: Path, cmd: list[str]) -> subprocess.Popen[bytes] | None:
         self.commands.append(cmd)
-        if self.auto_start:
-            (folder / ".agent-relay" / "started").touch()
         proc = subprocess.Popen(["sleep", "60"])
         self.procs.append(proc)
+        (folder / ".agent-relay" / "agent.pid").write_text(str(proc.pid))
+        if self.auto_start:
+            self._hook_file("started")
         return proc
 
-    def take_prompt(self) -> None:
-        """What the agent's prompt hook does."""
+    def capture(self, folder: Path) -> str | None:
+        return self.screen
+
+    def close(self, folder: Path) -> bool:
+        self.procs[-1].kill()
+        self.procs[-1].wait()
+        return True
+
+    def _hook_file(self, name: str, text: str = "") -> None:
+        """What an agent hook does: write a file in the session's .agent-relay folder."""
         folder = sorted(self.sessions_dir.iterdir())[-1]
-        (folder / ".agent-relay" / "started").touch()
+        path = folder / ".agent-relay" / name
+        path.write_text(text)
+        self._clock += 1
+        os.utime(path, (self._clock, self._clock))
+
+    def agent_works(self) -> None:
+        self._hook_file("active")
+
+    def agent_finishes(self, message: str, **extra: object) -> None:
+        self._hook_file("stop.json", json.dumps({"last_assistant_message": message, **extra}))
+
+    def take_prompt(self) -> None:
+        self._hook_file("started")
 
     def end_session(self) -> None:
         proc = self.procs[-1]
@@ -161,10 +186,16 @@ class Harness:
         """First line of each reply, without the "AgentRelay Message: " prefix."""
         return [m.get_content().splitlines()[0].removeprefix(MESSAGE_PREFIX) for m in FakeSMTP.sent]
 
+    @property
+    def full_replies(self) -> list[str]:
+        """Each reply's whole text, without the prefix or the final newline."""
+        return [m.get_content().removeprefix(MESSAGE_PREFIX).rstrip("\n") for m in FakeSMTP.sent]
+
     def cycle(self) -> None:
         """One pass of the listener loop."""
         self.relay.finish_session_if_closed()
         self.relay.check_started()
+        self.relay.check_finished()
         self.relay.check_mail(self.gmail)
         self.relay.start_next()
 
