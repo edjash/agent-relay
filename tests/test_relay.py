@@ -10,6 +10,7 @@ from agent_relay.gmail import REPLY_HEADER
 
 
 def test_task_starts_a_session_and_replies(harness: Harness) -> None:
+    harness.launcher.auto_start = False
     harness.mailbox.add("claude: summarise the report", "Please read report.pdf")
     harness.cycle()
 
@@ -17,7 +18,14 @@ def test_task_starts_a_session_and_replies(harness: Harness) -> None:
     folder = harness.relay.running.folder
     prompt = "Task from email: summarise the report\n\nPlease read report.pdf"
     assert (folder / "prompt.md").read_text() == prompt + "\n"
-    assert harness.launcher.commands == [["/usr/bin/claude", prompt]]
+    cmd = harness.launcher.commands[0]
+    assert cmd[:2] == ["sh", "-c"]  # records the agent's process ID first
+    assert cmd[4] == "/usr/bin/claude"
+    assert cmd[5] == "--settings" and "UserPromptSubmit" in cmd[6]
+    assert cmd[-1] == prompt
+    assert harness.replies == []  # not until the agent takes the prompt
+    harness.launcher.take_prompt()
+    harness.cycle()
     assert harness.replies == [f"Started claude in {folder}"]
     reply = FakeSMTP.sent[0]
     assert reply["From"] == "AgentRelay <owner@example.com>"
@@ -32,10 +40,54 @@ def test_flags_from_settings_go_before_the_prompt(harness: Harness) -> None:
     harness.relay.cfg = replace(harness.relay.cfg, tool_args={"codex": ("--yolo", "-m", "o3")})
     harness.mailbox.add("codex: fix it", "the failing test")
     harness.cycle()
-    assert harness.launcher.commands[0] == [
+    assert harness.launcher.commands[0][4:10] == [
         "/usr/bin/codex", "-c", "check_for_update_on_startup=false", "--yolo", "-m", "o3",
-        "Task from email: fix it\n\nthe failing test",
     ]  # fmt: skip
+    assert harness.launcher.commands[0][-1] == "Task from email: fix it\n\nthe failing test"
+
+
+def test_codex_gets_a_trusted_prompt_hook(harness: Harness) -> None:
+    harness.mailbox.add("codex: fix it", "the failing test")
+    harness.cycle()
+    cmd = harness.launcher.commands[0]
+    assert "--dangerously-bypass-hook-trust" in cmd
+    assert "features.codex_hooks=true" in cmd
+    hook = next(a for a in cmd if a.startswith("hooks.UserPromptSubmit="))
+    assert hook.endswith('/.agent-relay/started"}]}]')
+
+
+def test_session_that_never_takes_its_prompt_is_closed(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.mailbox.add("claude: stuck", "on a login screen")
+    harness.mailbox.add("codex: next", "waiting")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    assert [x[:7] for x in harness.replies] == ["Queued:"]  # for the codex task; no "Started" yet
+    r.started -= 179
+    harness.cycle()
+    assert r.phase == "starting"  # not yet
+
+    r.started -= 2
+    harness.cycle()
+    assert r.phase == "abandoned"
+    assert harness.replies[-1].startswith("Didn't start: claude hadn't taken the prompt after 3 min")
+    assert r.task.hash not in harness.state.recent  # can be sent again straight away
+    r.proc.wait(5)
+    harness.launcher.auto_start = True
+    harness.cycle()  # the window has closed: no "Session closed" reply; the next task starts
+    assert not any(x.startswith("Session closed") for x in harness.replies)
+    assert harness.relay.running is not None and harness.relay.running.task.tool == "codex"
+    assert harness.replies[-1].startswith("Started codex")
+
+
+def test_window_closed_before_the_prompt_was_taken(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.mailbox.add("claude: x", "y")
+    harness.cycle()
+    harness.launcher.end_session()
+    harness.cycle()
+    assert harness.replies == ["Closed before claude took the prompt; nothing ran."]
 
 
 def test_mail_while_busy_is_queued_with_position(harness: Harness) -> None:

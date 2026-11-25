@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -20,9 +22,37 @@ FIXED_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 
+# AgentRelay's own files inside a session folder (hidden from the file list).
+RELAY_DIR = ".agent-relay"
+STARTED_MARKER = "started"  # created by the agent's prompt hook
+PID_FILE = "agent.pid"  # the agent's process ID, to close a session that never started
+
+
 def build_command(exe: str, tool: str, extra: tuple[str, ...] = (), prompt: str | None = None) -> list[str]:
     """exe, the fixed flags, the flags from .env, then the prompt."""
     return [exe, *FIXED_ARGS.get(tool, ()), *extra, *([prompt] if prompt is not None else [])]
+
+
+def started_hook_args(tool: str, marker: Path) -> list[str]:
+    """Flags that make the agent create `marker` once it has accepted the prompt
+    (its UserPromptSubmit hook). A login screen, update notice or any other
+    dialog keeps it from appearing."""
+    hook = {"type": "command", "command": f"touch {shlex.quote(str(marker))}"}
+    if tool == "claude":
+        return ["--settings", json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [hook]}]}})]
+    # Codex: TOML values through -c; JSON strings are valid TOML strings.
+    toml_hook = "{" + ", ".join(f"{k} = {json.dumps(v)}" for k, v in hook.items()) + "}"
+    return [
+        "--dangerously-bypass-hook-trust",  # otherwise Codex asks before running the hook
+        "-c", "features.codex_hooks=true",
+        "-c", f"hooks.UserPromptSubmit=[{{hooks = [{toml_hook}]}}]",
+    ]  # fmt: skip
+
+
+def with_pid_file(cmd: list[str], pid_file: Path) -> list[str]:
+    """Run cmd through sh so its process ID is written to pid_file first
+    (exec keeps the same process)."""
+    return ["sh", "-c", 'echo $$ > "$0" && exec "$@"', str(pid_file), *cmd]
 
 
 def find_tool(name: str) -> str | None:

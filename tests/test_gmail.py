@@ -82,7 +82,7 @@ def test_idle_wakes_when_the_session_ends(fake_server: tuple[socket.socket, int]
     proc = subprocess.Popen(["sleep", "0.5"])
     pidfd = os.pidfd_open(proc.pid)
     try:
-        changed, took = timed(gmail.idle_wait, 30, pidfd)
+        changed, took = timed(gmail.idle_wait, 30, [pidfd])
     finally:
         os.close(pidfd)
         proc.wait()

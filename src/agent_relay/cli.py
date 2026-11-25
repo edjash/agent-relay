@@ -115,7 +115,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         running = listener.get("running")
         if running:
             mins = int((time.time() - running["started"]) // 60)
-            print(f"Session:   {running['tool']}: {running['title'][:60]} ({mins} min, {running['folder']})")
+            waiting = " (waiting for it to take the prompt)" if running.get("phase") == "starting" else ""
+            print(f"Session:   {running['tool']}: {running['title'][:60]} ({mins} min, {running['folder']}){waiting}")
         else:
             print("Session:   none")
     print(f"Queue:     {len(state.queue)} of {cfg.limits.queue_max}")

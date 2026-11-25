@@ -7,7 +7,7 @@ import imaplib
 import re
 import select
 import time
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -117,9 +117,9 @@ class Gmail:
             raw = re.sub(rb"\\(.)", rb"\1", m.group(1)) if m else b""
         return decode_part(raw, part)
 
-    def idle_wait(self, timeout: float, also_fd: int | None = None) -> bool:
-        """Block in IMAP IDLE until the mailbox changes, `also_fd` becomes
-        readable (the session ended), or `timeout` passes. Returns True if
+    def idle_wait(self, timeout: float, also_fds: Sequence[int] = ()) -> bool:
+        """Block in IMAP IDLE until the mailbox changes, one of `also_fds`
+        becomes readable (the session started or ended), or `timeout` passes. Returns True if
         Gmail reported a change.
 
         Python 3.13's imaplib has no idle(), so this speaks RFC 2177 directly.
@@ -131,7 +131,8 @@ class Gmail:
         if not reply.startswith(b"+"):
             raise imaplib.IMAP4.error(f"IDLE refused: {reply!r}")
 
-        fds = [imap.sock] + ([also_fd] if also_fd is not None else [])
+        sock = imap.sock.fileno()
+        fds = [sock, *also_fds]
         changed = False
         deadline = time.monotonic() + timeout
         while not changed:
@@ -139,8 +140,8 @@ class Gmail:
             if remaining <= 0:
                 break
             ready, _, _ = select.select(fds, [], [], remaining)
-            if not ready or imap.sock not in ready:
-                break  # timed out, or the session ended
+            if not ready or sock not in ready:
+                break  # timed out, or the session started or ended
             line = imap.readline()
             if not line:
                 raise EOFError("connection closed during IDLE")

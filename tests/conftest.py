@@ -113,6 +113,7 @@ class FakeLauncher(Launcher):
     def __init__(self, sessions_dir: Path, *, tool_installed: bool = True):
         super().__init__(sessions_dir)
         self.tool_installed = tool_installed
+        self.auto_start = True  # the agent takes its prompt as soon as it opens
         self.procs: list[subprocess.Popen[bytes]] = []
         self.commands: list[list[str]] = []
         self._n = itertools.count()
@@ -127,9 +128,16 @@ class FakeLauncher(Launcher):
 
     def open(self, folder: Path, cmd: list[str]) -> subprocess.Popen[bytes] | None:
         self.commands.append(cmd)
+        if self.auto_start:
+            (folder / ".agent-relay" / "started").touch()
         proc = subprocess.Popen(["sleep", "60"])
         self.procs.append(proc)
         return proc
+
+    def take_prompt(self) -> None:
+        """What the agent's prompt hook does."""
+        folder = sorted(self.sessions_dir.iterdir())[-1]
+        (folder / ".agent-relay" / "started").touch()
 
     def end_session(self) -> None:
         proc = self.procs[-1]
@@ -156,6 +164,7 @@ class Harness:
     def cycle(self) -> None:
         """One pass of the listener loop."""
         self.relay.finish_session_if_closed()
+        self.relay.check_started()
         self.relay.check_mail(self.gmail)
         self.relay.start_next()
 

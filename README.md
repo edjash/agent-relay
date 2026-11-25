@@ -29,7 +29,8 @@ It uses only the Python standard library.
 | empty (`claude:` and nothing else) | not started | asks for a task |
 | the same task again within an hour | ignored | no |
 | accepted while a session is running | queued | queue position |
-| accepted and started | session opens | "started", with the folder |
+| accepted and started | session opens; "started" once the agent takes the prompt | "started", with the folder |
+| stuck at start (no prompt taken in 3 minutes: login, update, other dialog) | window closed, next task starts | "didn't start" |
 | failed to start | dropped | the reason |
 | finished (window closed) | next task starts | files left in the folder |
 
@@ -135,6 +136,7 @@ typo can't silently fall back to a default. To keep `.env` somewhere else, set `
 | `AGENT_RELAY_FLOOD_COUNT` / `_FLOOD_WINDOW_MINUTES` | 10 / 10 | flood breaker threshold |
 | `AGENT_RELAY_REPLY_BUDGET` | 30 | replies per rolling 24 hours |
 | `AGENT_RELAY_DUPLICATE_WINDOW_MINUTES` | 60 | identical task ignored within this window |
+| `AGENT_RELAY_START_TIMEOUT_MINUTES` | 3 | close a session that hasn't taken its prompt by then |
 | `AGENT_RELAY_LOG_LEVEL` / `_LOG_FILE` | `INFO` / none | |
 
 State (handled emails, queue, reply count) lives in `~/.local/state/agent-relay/state.json`.

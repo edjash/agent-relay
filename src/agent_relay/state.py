@@ -25,6 +25,7 @@ class Task:
     tool: str
     title: str
     prompt: str = ""
+    hash: str = ""  # for duplicate detection; cleared if the session never starts
 
 
 class State:
