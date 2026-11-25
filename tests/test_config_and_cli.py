@@ -69,6 +69,7 @@ def test_template_is_private_and_must_be_filled_in(paths: Path) -> None:
 
 def test_template_defaults_load(paths: Path) -> None:
     cfg = load(write_template(paths / ".env"), require_gmail=False)
+    assert cfg.sessions_dir == PROJECT_DIR / "sessions"
     assert cfg.limits == config.Limits()
     assert cfg.log_file is None
     assert cfg.log_level == "INFO"

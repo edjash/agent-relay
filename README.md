@@ -125,7 +125,7 @@ typo can't silently fall back to a default. To keep `.env` somewhere else, set `
 | `AGENT_RELAY_GMAIL_USER` | | the inbox to watch |
 | `AGENT_RELAY_APP_PASSWORD` | | Google app password |
 | `AGENT_RELAY_ALLOWED_SENDERS` | | comma-separated addresses allowed to send tasks |
-| `AGENT_RELAY_SESSIONS_DIR` | `~/agent-relay/sessions` | where session folders are created |
+| `AGENT_RELAY_SESSIONS_DIR` | `sessions/` in the project folder | where session folders are created |
 | `AGENT_RELAY_MAX_AGE_HOURS` | 24 | ignore older task emails |
 | `AGENT_RELAY_QUEUE_MAX` | 5 | tasks allowed to wait |
 | `AGENT_RELAY_FLOOD_COUNT` / `_FLOOD_WINDOW_MINUTES` | 10 / 10 | flood breaker threshold |

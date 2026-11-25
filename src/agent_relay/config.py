@@ -27,7 +27,7 @@ LOCK_PATH = STATE_DIR / "listener.lock"
 
 PLACEHOLDER_USER = "you@gmail.com"
 PLACEHOLDER_PASSWORD = "xxxx xxxx xxxx xxxx"
-DEFAULT_SESSIONS_DIR = "~/agent-relay/sessions"
+DEFAULT_SESSIONS_DIR = PROJECT_DIR / "sessions"
 
 # Kept identical to .env.example (a test checks).
 TEMPLATE = f"""\
@@ -42,8 +42,8 @@ AGENT_RELAY_APP_PASSWORD={PLACEHOLDER_PASSWORD}
 # Only genuine mail from these addresses can start a session (comma-separated).
 AGENT_RELAY_ALLOWED_SENDERS={PLACEHOLDER_USER}
 
-# Each session gets a new folder in here.
-AGENT_RELAY_SESSIONS_DIR={DEFAULT_SESSIONS_DIR}
+# Each session gets a new folder in here. Blank: the sessions folder in this project.
+AGENT_RELAY_SESSIONS_DIR=
 
 # Limits (optional; these are the defaults).
 AGENT_RELAY_MAX_AGE_HOURS=24             # ignore task emails received longer ago than this
@@ -90,7 +90,7 @@ class Config:
     gmail_user: str = ""
     app_password: str = field(default="", repr=False)
     allowed_senders: frozenset[str] = frozenset()
-    sessions_dir: Path = field(default_factory=lambda: Path(DEFAULT_SESSIONS_DIR).expanduser())
+    sessions_dir: Path = DEFAULT_SESSIONS_DIR
     limits: Limits = Limits()
     log_level: str = "INFO"
     log_file: Path | None = None
@@ -143,6 +143,13 @@ def _positive_int(values: dict[str, str], key: str, default: int) -> int:
     return int(raw)
 
 
+def _sessions_dir(value: str) -> Path:
+    """Blank means the project's sessions folder; a relative path is taken from the project folder."""
+    if not value.strip():
+        return DEFAULT_SESSIONS_DIR
+    return PROJECT_DIR / Path(value.strip()).expanduser()
+
+
 def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
     """Load settings from the .env file, then real environment variables.
     With require_gmail=False a missing or unfinished file is fine (for commands
@@ -166,7 +173,7 @@ def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
         gmail_user=values.get(PREFIX + "GMAIL_USER", "").strip(),
         app_password=values.get(PREFIX + "APP_PASSWORD", ""),
         allowed_senders=frozenset(s.lower() for s in senders if s),
-        sessions_dir=Path(values.get(PREFIX + "SESSIONS_DIR", "").strip() or DEFAULT_SESSIONS_DIR).expanduser(),
+        sessions_dir=_sessions_dir(values.get(PREFIX + "SESSIONS_DIR", "")),
         limits=Limits(
             max_age=timedelta(hours=_positive_int(values, "MAX_AGE_HOURS", 24)),
             queue_max=_positive_int(values, "QUEUE_MAX", 5),

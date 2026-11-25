@@ -15,3 +15,6 @@ dist/
 *.sw?
 .*.sw?
 *.un~
+
+# Session folders (the default AGENT_RELAY_SESSIONS_DIR)
+/sessions/
