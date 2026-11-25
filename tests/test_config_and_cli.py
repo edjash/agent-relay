@@ -132,6 +132,13 @@ def test_cli_status_without_listener(paths: Path, capsys: pytest.CaptureFixture[
     assert "missing: run agent-relay init" in out
 
 
+def test_cli_without_a_command_shows_the_commands(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main([]) == 1
+    out = capsys.readouterr().out
+    for command in ("init", "run", "check", "status", "new", "install-service"):
+        assert command in out
+
+
 def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["--version"])

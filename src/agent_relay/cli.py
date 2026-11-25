@@ -160,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Start Claude Code or Codex sessions from Gmail, and reply with progress.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     sub.add_parser("init", help="create .env from .env.example").set_defaults(func=cmd_init)
 
@@ -186,7 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:  # bare `agent-relay`: show the commands
+        parser.print_help()
+        return EXIT_ERROR
     try:
         code: int = args.func(args)
         return code

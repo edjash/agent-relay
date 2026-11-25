@@ -10,3 +10,8 @@ dist/
 .claude/settings.local.json
 # Settings and secrets (see .env.example)
 .env
+# Editor backup, swap and undo files (a .env~ would contain the password)
+*~
+*.sw?
+.*.sw?
+*.un~
