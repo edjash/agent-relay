@@ -98,6 +98,15 @@ systemctl --user enable --now agent-relay
 journalctl --user -u agent-relay -f     # logs
 ```
 
+To stop it, or remove it completely:
+
+```bash
+systemctl --user stop agent-relay                   # stop until the next login
+systemctl --user disable --now agent-relay          # stop and don't start at login
+rm ~/.config/systemd/user/agent-relay.service       # then remove the service...
+systemctl --user daemon-reload                      # ...and tell systemd it's gone
+```
+
 It starts with your desktop session and restarts after a crash. Problems a restart can't fix (bad settings,
 wrong password, already running) exit with code 2 and the service stays stopped.
 
