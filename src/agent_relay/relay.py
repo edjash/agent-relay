@@ -18,7 +18,7 @@ from pathlib import Path
 from agent_relay.config import Config
 from agent_relay.gmail import REPLY_HEADER, Fetched, Gmail
 from agent_relay.replies import Replier
-from agent_relay.sessions import PROMPT_FILE, Launcher, list_files
+from agent_relay.sessions import PROMPT_FILE, Launcher, build_command, list_files
 from agent_relay.state import State, Task
 from agent_relay.trust import is_trusted
 
@@ -198,7 +198,8 @@ class Relay:
                 continue
             folder = self.launcher.new_folder(task.tool)
             (folder / PROMPT_FILE).write_text(task.prompt + "\n")
-            proc = self.launcher.open(folder, [exe, task.prompt])
+            cmd = build_command(exe, task.tool, self.cfg.tool_args.get(task.tool, ()), task.prompt)
+            proc = self.launcher.open(folder, cmd)
             if not proc:
                 log.error("  No terminal emulator found")
                 self.replier.reply(task, "Couldn't start: no terminal emulator found.")

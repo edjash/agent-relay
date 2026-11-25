@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -27,7 +28,9 @@ LOCK_PATH = STATE_DIR / "listener.lock"
 
 PLACEHOLDER_USER = "you@gmail.com"
 PLACEHOLDER_PASSWORD = "xxxx xxxx xxxx xxxx"
-DEFAULT_SESSIONS_DIR = PROJECT_DIR / "sessions"
+# Outside the project on purpose: a session started by email must not sit
+# inside the repository that holds .env and the code that checks senders.
+DEFAULT_SESSIONS_DIR = Path("~/agent-relay/sessions").expanduser()
 
 # Kept identical to .env.example (a test checks).
 TEMPLATE = f"""\
@@ -42,8 +45,13 @@ AGENT_RELAY_APP_PASSWORD={PLACEHOLDER_PASSWORD}
 # Only genuine mail from these addresses can start a session (comma-separated).
 AGENT_RELAY_ALLOWED_SENDERS={PLACEHOLDER_USER}
 
-# Each session gets a new folder in here. Blank: the sessions folder in this project.
+# Each session gets a new folder in here. Blank: ~/agent-relay/sessions
 AGENT_RELAY_SESSIONS_DIR=
+
+# Extra command-line flags for each agent, written as in a shell. Sessions run
+# unattended, so these skip the permission prompts. Blank: no flags.
+AGENT_RELAY_CLAUDE_ARGS=--dangerously-skip-permissions
+AGENT_RELAY_CODEX_ARGS=--dangerously-bypass-approvals-and-sandbox
 
 # Limits (optional; these are the defaults).
 AGENT_RELAY_MAX_AGE_HOURS=24             # ignore task emails received longer ago than this
@@ -61,7 +69,7 @@ AGENT_RELAY_LOG_FILE=       # empty means terminal / systemd journal only
 KNOWN_KEYS = frozenset(
     PREFIX + k
     for k in (
-        "GMAIL_USER", "APP_PASSWORD", "ALLOWED_SENDERS", "SESSIONS_DIR",
+        "GMAIL_USER", "APP_PASSWORD", "ALLOWED_SENDERS", "SESSIONS_DIR", "CLAUDE_ARGS", "CODEX_ARGS",
         "MAX_AGE_HOURS", "QUEUE_MAX", "FLOOD_COUNT", "FLOOD_WINDOW_MINUTES",
         "REPLY_BUDGET", "DUPLICATE_WINDOW_MINUTES", "LOG_LEVEL", "LOG_FILE",
         "ENV_FILE",
@@ -91,6 +99,8 @@ class Config:
     app_password: str = field(default="", repr=False)
     allowed_senders: frozenset[str] = frozenset()
     sessions_dir: Path = DEFAULT_SESSIONS_DIR
+    # Extra flags per agent ("claude", "codex"), straight from .env.
+    tool_args: dict[str, tuple[str, ...]] = field(default_factory=dict)
     limits: Limits = Limits()
     log_level: str = "INFO"
     log_file: Path | None = None
@@ -144,10 +154,22 @@ def _positive_int(values: dict[str, str], key: str, default: int) -> int:
 
 
 def _sessions_dir(value: str) -> Path:
-    """Blank means the project's sessions folder; a relative path is taken from the project folder."""
+    """Blank means the default. Relative paths are refused: they would depend
+    on the folder the listener happens to start in."""
     if not value.strip():
         return DEFAULT_SESSIONS_DIR
-    return PROJECT_DIR / Path(value.strip()).expanduser()
+    path = Path(value.strip()).expanduser()
+    if not path.is_absolute():
+        raise ConfigError(f"{PREFIX}SESSIONS_DIR must be an absolute path or start with ~ (got {value.strip()!r})")
+    return path
+
+
+def _args(values: dict[str, str], tool: str) -> tuple[str, ...]:
+    key = f"{PREFIX}{tool.upper()}_ARGS"
+    try:
+        return tuple(shlex.split(values.get(key, "")))
+    except ValueError as e:
+        raise ConfigError(f"{key}: {e}") from None
 
 
 def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
@@ -174,6 +196,7 @@ def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
         app_password=values.get(PREFIX + "APP_PASSWORD", ""),
         allowed_senders=frozenset(s.lower() for s in senders if s),
         sessions_dir=_sessions_dir(values.get(PREFIX + "SESSIONS_DIR", "")),
+        tool_args={tool: _args(values, tool) for tool in ("claude", "codex")},
         limits=Limits(
             max_age=timedelta(hours=_positive_int(values, "MAX_AGE_HOURS", 24)),
             queue_max=_positive_int(values, "QUEUE_MAX", 5),

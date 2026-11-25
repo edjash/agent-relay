@@ -131,7 +131,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_new(args: argparse.Namespace) -> int:
     cfg = config.load(require_gmail=False)
-    return start_interactive(cfg.sessions_dir, args.tool)
+    return start_interactive(cfg.sessions_dir, args.tool, cfg.tool_args.get(args.tool, ()))
 
 
 def cmd_install_service(args: argparse.Namespace) -> int:

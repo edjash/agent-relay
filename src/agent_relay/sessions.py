@@ -14,6 +14,15 @@ log = logging.getLogger(__name__)
 
 TOOLS = ("claude", "codex")
 PROMPT_FILE = "prompt.md"
+# Always passed, whatever .env says: nobody is there to answer these prompts.
+FIXED_ARGS: dict[str, tuple[str, ...]] = {
+    "codex": ("-c", "check_for_update_on_startup=false"),
+}
+
+
+def build_command(exe: str, tool: str, extra: tuple[str, ...] = (), prompt: str | None = None) -> list[str]:
+    """exe, the fixed flags, the flags from .env, then the prompt."""
+    return [exe, *FIXED_ARGS.get(tool, ()), *extra, *([prompt] if prompt is not None else [])]
 
 
 def find_tool(name: str) -> str | None:
@@ -78,7 +87,7 @@ class Launcher:
         return open_in_new_terminal(folder, cmd)
 
 
-def start_interactive(sessions_dir: Path, tool: str) -> int:
+def start_interactive(sessions_dir: Path, tool: str, args: tuple[str, ...] = ()) -> int:
     """`agent-relay new`: a fresh session folder and an interactive session.
     In a terminal the tool takes it over; otherwise a new window opens."""
     exe = find_tool(tool)
@@ -87,7 +96,7 @@ def start_interactive(sessions_dir: Path, tool: str) -> int:
         return 1
     folder = new_session_folder(sessions_dir, tool)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return 0 if open_in_new_terminal(folder, [exe]) else 1
+        return 0 if open_in_new_terminal(folder, build_command(exe, tool, args)) else 1
     print(f"Starting {tool} in {folder}")
     os.chdir(folder)
-    os.execv(exe, [exe])  # replaces this process
+    os.execv(exe, build_command(exe, tool, args))  # replaces this process

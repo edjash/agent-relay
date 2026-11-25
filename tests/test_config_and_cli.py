@@ -15,6 +15,7 @@ AGENT_RELAY_ALLOWED_SENDERS=Owner@Example.com, other@example.com
 AGENT_RELAY_SESSIONS_DIR=/tmp/sessions-test
 AGENT_RELAY_QUEUE_MAX=3   # fewer
 AGENT_RELAY_FLOOD_WINDOW_MINUTES=5
+AGENT_RELAY_CODEX_ARGS=--yolo -c 'model="o3 mini"'
 """
 
 
@@ -69,7 +70,9 @@ def test_template_is_private_and_must_be_filled_in(paths: Path) -> None:
 
 def test_template_defaults_load(paths: Path) -> None:
     cfg = load(write_template(paths / ".env"), require_gmail=False)
-    assert cfg.sessions_dir == PROJECT_DIR / "sessions"
+    assert cfg.sessions_dir == Path.home() / "agent-relay/sessions"
+    assert cfg.tool_args["claude"] == ("--dangerously-skip-permissions",)
+    assert cfg.tool_args["codex"] == ("--dangerously-bypass-approvals-and-sandbox",)
     assert cfg.limits == config.Limits()
     assert cfg.log_file is None
     assert cfg.log_level == "INFO"
@@ -85,6 +88,7 @@ def test_filled_env_loads(paths: Path) -> None:
     assert cfg.limits.queue_max == 3
     assert cfg.limits.flood_window == timedelta(minutes=5)
     assert cfg.limits.reply_budget == 30  # default
+    assert cfg.tool_args == {"claude": (), "codex": ("--yolo", "-c", 'model="o3 mini"')}
     assert "abcd" not in repr(cfg)  # the password never shows up in logs
 
 
@@ -109,6 +113,7 @@ def test_loose_permissions_are_tightened(paths: Path) -> None:
         (FILLED.replace("QUEUE_MAX=3", "QUEUE_MAX=0"), "AGENT_RELAY_QUEUE_MAX"),
         (FILLED.replace("QUEUE_MAX=3", "QUEUE_MAX=lots"), "AGENT_RELAY_QUEUE_MAX"),
         (FILLED + "AGENT_RELAY_QUEUE_MAXX=4\n", "unknown setting.*QUEUE_MAXX"),
+        (FILLED.replace("=/tmp/sessions-test", "=sessions"), "SESSIONS_DIR must be an absolute path"),
     ],
 )
 def test_bad_settings_are_explained(paths: Path, text: str, message: str) -> None:

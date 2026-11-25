@@ -1,6 +1,7 @@
 """The relay's decisions: what starts, what queues, what gets a reply."""
 
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from conftest import FakeLauncher, FakeSMTP, Harness
@@ -25,6 +26,16 @@ def test_task_starts_a_session_and_replies(harness: Harness) -> None:
     assert reply["Subject"] == "Re: claude: summarise the report"
     assert reply["In-Reply-To"] == "<m1@example.com>"
     assert reply[REPLY_HEADER] == "reply"
+
+
+def test_flags_from_settings_go_before_the_prompt(harness: Harness) -> None:
+    harness.relay.cfg = replace(harness.relay.cfg, tool_args={"codex": ("--yolo", "-m", "o3")})
+    harness.mailbox.add("codex: fix it", "the failing test")
+    harness.cycle()
+    assert harness.launcher.commands[0] == [
+        "/usr/bin/codex", "-c", "check_for_update_on_startup=false", "--yolo", "-m", "o3",
+        "Task from email: fix it\n\nthe failing test",
+    ]  # fmt: skip
 
 
 def test_mail_while_busy_is_queued_with_position(harness: Harness) -> None:

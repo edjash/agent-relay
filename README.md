@@ -49,7 +49,9 @@ A task email makes an agent run on your machine, so AgentRelay only accepts mail
   which outsiders cannot set) or Gmail's own topmost `Authentication-Results` header shows `dmarc=pass`.
 
 A forged `From` header is ignored silently: replying would confirm the relay exists and could mail a faked
-address. Sessions still show the agent's normal permission prompts; don't add flags that skip them.
+address. Sessions run unattended, so nobody is there to answer permission prompts: `.env.example` passes
+the agents' skip-permission flags (`AGENT_RELAY_CLAUDE_ARGS`, `AGENT_RELAY_CODEX_ARGS`), and a session can
+do anything your user account can. The sender check above is what keeps that safe.
 
 ## Install
 
@@ -125,7 +127,9 @@ typo can't silently fall back to a default. To keep `.env` somewhere else, set `
 | `AGENT_RELAY_GMAIL_USER` | | the inbox to watch |
 | `AGENT_RELAY_APP_PASSWORD` | | Google app password |
 | `AGENT_RELAY_ALLOWED_SENDERS` | | comma-separated addresses allowed to send tasks |
-| `AGENT_RELAY_SESSIONS_DIR` | `sessions/` in the project folder | where session folders are created |
+| `AGENT_RELAY_SESSIONS_DIR` | `~/agent-relay/sessions` | where session folders are created |
+| `AGENT_RELAY_CLAUDE_ARGS` | none (`.env.example`: `--dangerously-skip-permissions`) | extra flags for Claude, shell-style |
+| `AGENT_RELAY_CODEX_ARGS` | none (`.env.example`: `--dangerously-bypass-approvals-and-sandbox`) | extra flags for Codex, shell-style |
 | `AGENT_RELAY_MAX_AGE_HOURS` | 24 | ignore older task emails |
 | `AGENT_RELAY_QUEUE_MAX` | 5 | tasks allowed to wait |
 | `AGENT_RELAY_FLOOD_COUNT` / `_FLOOD_WINDOW_MINUTES` | 10 / 10 | flood breaker threshold |
