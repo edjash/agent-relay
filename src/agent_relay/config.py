@@ -27,7 +27,7 @@ LOCK_PATH = STATE_DIR / "listener.lock"
 
 PLACEHOLDER_USER = "you@gmail.com"
 PLACEHOLDER_PASSWORD = "xxxx xxxx xxxx xxxx"
-DEFAULT_SESSIONS_DIR = "~/Projects/research/sessions"
+DEFAULT_SESSIONS_DIR = "~/agent-relay/sessions"
 
 # Kept identical to .env.example (a test checks).
 TEMPLATE = f"""\
