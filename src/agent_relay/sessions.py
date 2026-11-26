@@ -91,6 +91,22 @@ def tmux_capture(name: str) -> str | None:
     return out.rstrip() or None
 
 
+def tmux_send(name: str, steps: list[tuple[bool, str]]) -> bool:
+    """Type into the session. Each step is (literal, text): literal text is
+    typed as-is; otherwise text is a tmux key name such as Enter or C-c."""
+    try:
+        for literal, text in steps:
+            if text.endswith(";"):  # tmux reads a trailing ";" as "next command"
+                text = text[:-1] + "\\;"
+            subprocess.run(
+                ["tmux", "-L", TMUX_SOCKET, "send-keys", "-t", f"={name}:", *(["-l"] if literal else []), "--", text],
+                capture_output=True, timeout=10, check=True,
+            )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
 def tmux_close(name: str) -> bool:
     try:
         subprocess.run(
@@ -183,6 +199,10 @@ class Launcher:
 
     def capture(self, folder: Path) -> str | None:
         return tmux_capture(folder.name) if shutil.which("tmux") else None
+
+    def send(self, folder: Path, steps: list[tuple[bool, str]]) -> bool:
+        """Type into the session's window (see tmux_send). False if that isn't possible."""
+        return bool(shutil.which("tmux")) and tmux_send(folder.name, steps)
 
     def close(self, folder: Path) -> bool:
         """Close the session's window. False if that isn't possible this way."""

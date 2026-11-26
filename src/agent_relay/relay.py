@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from agent_relay.config import Config
-from agent_relay.gmail import REPLY_HEADER, Fetched, Gmail
+from agent_relay.gmail import MAX_BODY_BYTES, REPLY_HEADER, Fetched, Gmail
 from agent_relay.replies import Replier
 from agent_relay.sessions import (
     ACTIVE_MARKER,
@@ -44,13 +44,26 @@ log = logging.getLogger(__name__)
 SUBJECT_RE = re.compile(r"^\s*(claude|codex|agent)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
 # "agent: <command>" emails control AgentRelay itself.
 COMMANDS_HELP = """\
-Commands (send as the email subject; the body is ignored):
-  agent: status   what is running, the queue, replies left today
-  agent: stop     close the running session now; the next task starts
-  agent: screen   what is on the running session's screen
-  agent: help     this list
+Commands (send as the email subject):
+  agent: status         what is running, the queue, replies left today
+  agent: stop           close the running session now; the next task starts
+  agent: screen         what is on the running session's screen
+  agent: type <text>    type into the session and press Enter (or put the text
+                        on the body's first line); replies with the screen
+  agent: keys <keys>    press keys, e.g. 'agent: keys down down enter'; replies
+                        with the screen. Keys: enter, esc, tab, shift-tab, space,
+                        backspace, up, down, left, right, ctrl-<letter>, or
+                        any single character
+  agent: help           this list
 
 Tasks: 'claude: <task>' or 'codex: <task>', with more detail in the body if needed."""
+# Key names for "agent: keys", as tmux names them.
+KEY_NAMES = {
+    "enter": "Enter", "return": "Enter", "esc": "Escape", "escape": "Escape", "tab": "Tab",
+    "shift-tab": "BTab", "space": "Space", "backspace": "BSpace", "delete": "DC",
+    "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+    "home": "Home", "end": "End", "pageup": "PPage", "pagedown": "NPage",
+}  # fmt: skip
 # Sessions AgentRelay closed itself (it has already replied about them).
 CLOSED_BY_RELAY = ("abandoned", "finished", "stopped")
 
@@ -86,11 +99,20 @@ Connect = Callable[[str, str], AbstractContextManager[Gmail]]
 
 
 def build_prompt(title: str, body: str) -> str:
-    # Starts with fixed text so the prompt can never be read as a command-line flag.
-    parts = [f"Task from email: {title}" if title else "Task from email:"]
-    if body:
-        parts.append(body)
-    return "\n\n".join(parts)
+    """The subject, a blank line, then the body. Leading hyphens are stripped so
+    the prompt can never be read as a command-line flag."""
+    return "\n\n".join(part for part in (title, body) if part).lstrip("-").strip()
+
+
+# Linux refuses a single command-line argument over 128 KiB; longer prompts are
+# passed as a pointer to the saved prompt file instead (with room to spare).
+MAX_PROMPT_ARG_BYTES = 100_000
+PROMPT_POINTER = f"Your task is in {PROMPT_FILE} in this folder. Read it and carry it out."
+
+
+def prompt_arg(prompt: str) -> str:
+    """The prompt itself, or a pointer to PROMPT_FILE if it's too long to pass."""
+    return prompt if len(prompt.encode()) <= MAX_PROMPT_ARG_BYTES else PROMPT_POINTER
 
 
 def task_hash(tool: str, title: str, body: str) -> str:
@@ -108,6 +130,7 @@ class RunningSession:
     # "starting" until the agent takes its prompt, then "running"; "finished" or
     # "abandoned" once AgentRelay has closed it.
     phase: str = "starting"
+    typed_at: float = 0.0  # last "agent: type/keys"; restarts the clock for taking the prompt
     waiting_logged: float = 0.0  # the finished-turn time already logged as waiting on background work
 
     @property
@@ -161,6 +184,7 @@ class Relay:
         self.arrivals: list[datetime] = []  # received times of trusted task mail (flood breaker)
         self.paused = False  # flood breaker tripped; cleared only by a restart
         self.running: RunningSession | None = None
+        self.settle_seconds = 2.0  # after typing into a session, before reading its screen
 
     # ---- intake: decide what to do with each new task email
 
@@ -208,14 +232,15 @@ class Relay:
             self.trip_flood_breaker(task)
             return
         if tool == "agent":
-            self.run_command(task)
+            self.run_command(task, lambda: gmail.fetch_body_text(f.uid))
             return
         if len(self.state.queue) >= self.limits.queue_max:
             log.warning("  Refused: queue full (%d waiting)", self.limits.queue_max)
             return
 
-        body = gmail.fetch_body_text(f.uid)
-        if not title and not body:
+        body, task.body_cut = gmail.fetch_body(f.uid)
+        prompt = build_prompt(title, body)
+        if not prompt:
             log.info("  Empty task")
             self.replier.reply(
                 task,
@@ -231,7 +256,7 @@ class Relay:
         task.hash = h
 
         busy = self.running is not None or bool(self.state.queue)
-        task.prompt = build_prompt(title, body)
+        task.prompt = prompt
         self.state.queue.append(task)
         position = len(self.state.queue)
         log.info("  Queued (position %d)", position)
@@ -244,10 +269,11 @@ class Relay:
 
     # ---- agent: commands
 
-    def run_command(self, task: Task) -> None:
+    def run_command(self, task: Task, body: Callable[[], str] = lambda: "") -> None:
         """Answer an "agent: <command>" email. Commands count towards the flood
         breaker and the reply budget like tasks, but never queue."""
-        command = task.title.split()[0].lower() if task.title.split() else ""
+        command, _, rest = task.title.partition(" ")
+        command, rest = command.lower(), rest.strip()
         log.info("  Command: %s", command or "(none)")
         if command == "status":
             self.replier.reply(task, self.status_text())
@@ -255,6 +281,12 @@ class Relay:
             self.replier.reply(task, self.stop_session())
         elif command == "screen":
             self.replier.reply(task, self.screen_text())
+        elif command == "type":
+            if not rest:
+                rest = next((line.strip() for line in body().splitlines() if line.strip()), "")
+            self.replier.reply(task, self.type_text(rest))
+        elif command == "keys":
+            self.replier.reply(task, self.press_keys(rest))
         elif command == "help":
             self.replier.reply(task, COMMANDS_HELP)
         else:
@@ -288,9 +320,47 @@ class Relay:
         log.info("  Stopping %s after %s", r.task.tool, took)
         stop = r.read_stop()
         summary = self._summary(r, stop) if r.phase == "running" else ""
+        self._forget(r.task)
         self._set_phase(r, "stopped")
         self._close_agent(r)
         return f"Stopped {r.task.tool} after {took}: {r.task.title[:80]}{summary}"
+
+    def type_text(self, text: str) -> str:
+        if not text:
+            return "Nothing to type: put the text after 'agent: type', or on the first line of the body."
+        return self._send([(True, text), (False, "Enter")], f"Typed '{text}' and pressed Enter.")
+
+    def press_keys(self, spec: str) -> str:
+        steps: list[tuple[bool, str]] = []
+        for word in spec.split():
+            key = word.lower()
+            if key in KEY_NAMES:
+                steps.append((False, KEY_NAMES[key]))
+            elif re.fullmatch(r"ctrl-[a-z]", key):
+                steps.append((False, f"C-{key[-1]}"))
+            elif len(word) == 1:
+                steps.append((True, word))
+            else:
+                return f"Unknown key '{word}'; nothing was pressed.\n\n{COMMANDS_HELP}"
+        if not steps:
+            return f"No keys given.\n\n{COMMANDS_HELP}"
+        return self._send(steps, f"Pressed {spec}.")
+
+    def _send(self, steps: list[tuple[bool, str]], done: str) -> str:
+        r = self.running
+        if r is None or r.phase in CLOSED_BY_RELAY:
+            return "Nothing is running."
+        if not self.launcher.send(r.folder, steps):
+            return "Couldn't type into the session (is tmux installed?)."
+        r.typed_at = time.time()
+        log.info("  %s", done)
+        time.sleep(self.settle_seconds)  # let the screen catch up before reading it
+        return f"{done}\n\n{self.screen_text()}"
+
+    def _forget(self, task: Task) -> None:
+        """Drop a task from the duplicate check, so sending it again starts it again."""
+        if task.hash:
+            self.state.recent.pop(task.hash, None)
 
     def screen_text(self) -> str:
         r = self.running
@@ -342,7 +412,7 @@ class Relay:
             relay_dir = folder / RELAY_DIR
             relay_dir.mkdir()
             extra = (*self.cfg.tool_args.get(task.tool, ()), *hook_args(task.tool, relay_dir))
-            cmd = with_pid_file(build_command(exe, task.tool, extra, task.prompt), relay_dir / PID_FILE)
+            cmd = with_pid_file(build_command(exe, task.tool, extra, prompt_arg(task.prompt)), relay_dir / PID_FILE)
             watch = FolderWatch(relay_dir)
             proc = self.launcher.open(folder, cmd)
             if not proc:
@@ -374,15 +444,17 @@ class Relay:
         if (r.relay_dir / STARTED_MARKER).exists():
             self._set_phase(r, "running")
             log.info("  %s took the prompt", r.task.tool)
+            cut = ""
+            if r.task.body_cut:
+                cut = f"\n\nThe email body was over {MAX_BODY_BYTES // 1_000_000} MB, so only the first part was used."
             self.replier.reply(
-                r.task, f"Started {r.task.tool} in {r.folder}\nThe prompt is saved there as {PROMPT_FILE}."
+                r.task, f"Started {r.task.tool} in {r.folder}\nThe prompt is saved there as {PROMPT_FILE}.{cut}"
             )
             return
         timeout = self.limits.start_timeout.total_seconds()
-        if time.time() - r.started < timeout:
+        if time.time() < self._start_deadline(r):
             return
-        if r.task.hash:  # so the same task can be sent again straight away
-            self.state.recent.pop(r.task.hash, None)
+        self._forget(r.task)
         minutes = int(timeout // 60)
         log.warning("  %s didn't take the prompt within %d min; closing it", r.task.tool, minutes)
         screen = self.launcher.capture(r.folder)
@@ -513,14 +585,17 @@ class Relay:
             return []
         return [r.pidfd] + ([r.watch.fd] if r.watch else [])
 
+    def _start_deadline(self, r: RunningSession) -> float:
+        """When a session that hasn't taken its prompt is given up on; typing into it restarts the clock."""
+        return max(r.started, r.typed_at) + self.limits.start_timeout.total_seconds()
+
     def wait_seconds(self, longest: float) -> float:
         """How long the listener may sleep: no later than the start deadline."""
         r = self.running
         if r is None:
             return longest
         if r.phase == "starting":
-            deadline = r.started + self.limits.start_timeout.total_seconds()
-            return max(1.0, min(longest, deadline - time.time() + 0.5))
+            return max(1.0, min(longest, self._start_deadline(r) - time.time() + 0.5))
         return longest
 
     # ---- listener bookkeeping for `agent-relay status`

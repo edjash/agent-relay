@@ -16,7 +16,7 @@ def test_task_starts_a_session_and_replies(harness: Harness) -> None:
 
     assert harness.relay.running is not None
     folder = harness.relay.running.folder
-    prompt = "Task from email: summarise the report\n\nPlease read report.pdf"
+    prompt = "summarise the report\n\nPlease read report.pdf"
     assert (folder / "prompt.md").read_text() == prompt + "\n"
     cmd = harness.launcher.commands[0]
     assert cmd[:2] == ["sh", "-c"]  # records the agent's process ID first
@@ -43,7 +43,31 @@ def test_flags_from_settings_go_before_the_prompt(harness: Harness) -> None:
     assert harness.launcher.commands[0][4:10] == [
         "/usr/bin/codex", "-c", "check_for_update_on_startup=false", "--yolo", "-m", "o3",
     ]  # fmt: skip
-    assert harness.launcher.commands[0][-1] == "Task from email: fix it\n\nthe failing test"
+    assert harness.launcher.commands[0][-1] == "fix it\n\nthe failing test"
+
+
+def test_leading_hyphens_are_stripped_from_the_prompt(harness: Harness) -> None:
+    harness.mailbox.add("codex: --help me", "keep - this")
+    harness.mailbox.add("claude: ---", "")
+    harness.mailbox.add("claude:", "-- from the body")
+    harness.cycle()
+    assert harness.launcher.commands[0][-1] == "help me\n\nkeep - this"
+    assert any(r.startswith("This email has no task in it.") for r in harness.replies)
+    assert harness.state.queue[-1].prompt == "from the body"
+
+
+def test_a_huge_prompt_is_passed_as_a_pointer_to_the_prompt_file(harness: Harness) -> None:
+    near = "é" * 50_000  # 100,000 bytes: still fits
+    harness.mailbox.add("claude:", near)
+    harness.mailbox.add("codex:", near + "x")
+    harness.cycle()
+    assert harness.launcher.commands[0][-1] == near
+    harness.launcher.end_session()
+    harness.cycle()
+    harness.cycle()
+    assert harness.launcher.commands[1][-1] == "Your task is in prompt.md in this folder. Read it and carry it out."
+    r = harness.relay.running
+    assert r is not None and (r.folder / "prompt.md").read_text() == near + "x\n"
 
 
 def test_codex_gets_a_trusted_prompt_hook(harness: Harness) -> None:
@@ -246,7 +270,21 @@ def test_only_headers_and_the_text_part_are_downloaded(harness: Harness) -> None
     assert len(fetches) == 3
     assert fetches[0].startswith("1,2 (X-GM-LABELS INTERNALDATE BODY.PEEK[HEADER.FIELDS")
     assert fetches[1] == "1 (BODYSTRUCTURE)"
-    assert fetches[2] == "1 (BODY.PEEK[1]<0.100000>)"
+    assert fetches[2] == "1 (BODY.PEEK[1]<0.1000001>)"
+
+
+def test_a_body_over_the_download_limit_is_cut_and_said_so(harness: Harness) -> None:
+    harness.mailbox.add("claude: big", "x" * 1_000_000)
+    harness.mailbox.add("codex: bigger", "y" * 1_000_001)
+    harness.cycle()
+    assert "over 1 MB" not in harness.full_replies[0]
+    assert harness.relay.running is not None
+    harness.launcher.end_session()
+    harness.cycle()
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None and r.task.prompt == "bigger\n\n" + "y" * 1_000_000
+    assert harness.full_replies[-1].endswith("The email body was over 1 MB, so only the first part was used.")
 
 
 def test_dry_run_starts_sends_and_saves_nothing(harness: Harness) -> None:
@@ -413,6 +451,10 @@ def test_agent_stop_closes_the_session_and_starts_the_next(harness: Harness) -> 
     assert not any(x.startswith(("Session closed", "Finished")) for x in harness.replies)
     assert harness.relay.running is not None and harness.relay.running.task.tool == "codex"
 
+    harness.mailbox.add("claude: going wrong", "x")  # a stopped task can be sent again
+    harness.cycle()
+    assert harness.state.queue and harness.state.queue[-1].title == "going wrong"
+
 
 def test_agent_screen(harness: Harness) -> None:
     harness.mailbox.add("agent: screen", "")
@@ -424,6 +466,69 @@ def test_agent_screen(harness: Harness) -> None:
     harness.mailbox.add("agent: screen", "")
     harness.cycle()
     assert harness.full_replies[-1] == "claude: long job\n\nBuilding... 42%"
+
+
+def test_agent_type_and_keys(harness: Harness) -> None:
+    harness.mailbox.add("agent: type 1", "")
+    harness.cycle()
+    assert harness.full_replies[-1] == "Nothing is running."
+
+    harness.launcher.auto_start = False  # stuck on a prompt
+    harness.mailbox.add("codex: job", "x")
+    harness.cycle()
+    harness.launcher.screen = "Update available? 1. Yes 2. No"
+    harness.mailbox.add("agent: type Skip This", "")
+    harness.cycle()
+    assert harness.launcher.sent == [(True, "Skip This"), (False, "Enter")]
+    assert harness.full_replies[-1] == (
+        "Typed 'Skip This' and pressed Enter.\n\ncodex: job\n\nUpdate available? 1. Yes 2. No"
+    )
+
+    harness.launcher.sent.clear()
+    harness.mailbox.add("agent:keys Down down ENTER ctrl-c shift-tab y ;", "")
+    harness.cycle()
+    assert harness.launcher.sent == [
+        (False, "Down"), (False, "Down"), (False, "Enter"), (False, "C-c"), (False, "BTab"), (True, "y"), (True, ";"),
+    ]  # fmt: skip
+    assert harness.full_replies[-1].startswith("Pressed Down down ENTER ctrl-c shift-tab y ;.\n\ncodex: job")
+
+    harness.launcher.sent.clear()
+    harness.mailbox.add("agent: keys down jump", "")
+    harness.mailbox.add("agent: keys", "")
+    harness.mailbox.add("agent: type", "\n  from the body  \nSent from my phone")
+    harness.mailbox.add("agent: type", "")
+    harness.cycle()
+    assert harness.full_replies[-4].startswith("Unknown key 'jump'; nothing was pressed.")
+    assert harness.full_replies[-3].startswith("No keys given.")
+    assert harness.full_replies[-2].startswith("Typed 'from the body' and pressed Enter.")
+    assert harness.full_replies[-1].startswith("Nothing to type")
+    assert harness.launcher.sent == [(True, "from the body"), (False, "Enter")]
+
+
+def test_typing_restarts_the_start_clock(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.launcher.screen = "Log in?"
+    harness.mailbox.add("claude: job", "x")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    r.started -= 170
+    harness.mailbox.add("agent: keys enter", "")
+    harness.cycle()
+    r.started -= 20  # 190 sec since it opened, but a key was just pressed
+    harness.cycle()
+    assert r.phase == "starting"
+    r.typed_at -= 181
+    harness.cycle()
+    assert r.phase == "abandoned"
+
+
+def test_typing_without_tmux(harness: Harness) -> None:
+    harness.mailbox.add("claude: job", "x")
+    harness.cycle()
+    harness.mailbox.add("agent: type hello", "")
+    harness.cycle()
+    assert harness.full_replies[-1] == "Couldn't type into the session (is tmux installed?)."
 
 
 def test_commands_count_towards_the_flood_breaker(harness: Harness) -> None:

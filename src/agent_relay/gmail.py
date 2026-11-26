@@ -21,7 +21,7 @@ IMAP_HOST = "imap.gmail.com"
 # (laptop slept, Wi-Fi changed...), which raises TimeoutError so we reconnect.
 NETWORK_TIMEOUT = 60
 # Largest amount of message text downloaded for a prompt.
-MAX_BODY_BYTES = 100_000
+MAX_BODY_BYTES = 1_000_000
 # Header on our own replies; mail carrying it is never treated as a task.
 REPLY_HEADER = "X-Agent-Relay"
 # Server-side pre-filter so ordinary mail is never downloaded.
@@ -98,24 +98,29 @@ class Gmail:
         return sorted(results, key=lambda r: int(r.uid))
 
     def fetch_body_text(self, uid: str) -> str:
-        """Download only the message's text part (never attachments), capped in size."""
+        return self.fetch_body(uid)[0]
+
+    def fetch_body(self, uid: str) -> tuple[str, bool]:
+        """Download only the message's text part (never attachments), capped at
+        MAX_BODY_BYTES. Also says whether it was longer than that and cut off."""
         typ, parts = self.imap.uid("FETCH", uid, "(BODYSTRUCTURE)")
         flat = flatten_response(parts) if typ == "OK" else b""
         at = flat.find(b"BODYSTRUCTURE (")
         if at < 0:
-            return ""
+            return "", False
         found = find_text_part(parse_imap_list(flat, at + len(b"BODYSTRUCTURE ")))
         if not found:
-            return ""
+            return "", False
         section, part = found
-        typ, parts = self.imap.uid("FETCH", uid, f"(BODY.PEEK[{section}]<0.{MAX_BODY_BYTES}>)")
+        typ, parts = self.imap.uid("FETCH", uid, f"(BODY.PEEK[{section}]<0.{MAX_BODY_BYTES + 1}>)")
         if typ != "OK":
-            return ""
+            return "", False
         raw = next((p[1] for p in parts if isinstance(p, tuple)), None)
         if raw is None:  # tiny bodies may come back as a quoted string
             m = re.search(rb'BODY\[[^\]]*\](?:<\d+>)? "((?:[^"\\]|\\.)*)"', flatten_response(parts))
             raw = re.sub(rb"\\(.)", rb"\1", m.group(1)) if m else b""
-        return decode_part(raw, part)
+        cut = len(raw) > MAX_BODY_BYTES  # one byte more was asked for, to tell
+        return decode_part(raw[:MAX_BODY_BYTES], part), cut
 
     def idle_wait(self, timeout: float, also_fds: Sequence[int] = ()) -> bool:
         """Block in IMAP IDLE until the mailbox changes, one of `also_fds`

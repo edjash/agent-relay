@@ -8,6 +8,7 @@ import imaplib
 import itertools
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -87,7 +88,9 @@ class FakeMailbox:
         m = self.mails[target]
         if items == "(BODYSTRUCTURE)":
             return "OK", [b"1 (UID " + target.encode() + b" BODYSTRUCTURE " + m.structure + b")"]
-        return "OK", [(b"1 (UID %s BODY[1]<0> {%d}" % (target.encode(), len(m.body)), m.body), b")"]
+        limit = int(re.search(r"<0\.(\d+)>", items).group(1))  # type: ignore[union-attr]
+        body = m.body[:limit]
+        return "OK", [(b"1 (UID %s BODY[1]<0> {%d}" % (target.encode(), len(body)), body), b")"]
 
 
 class FakeSMTP:
@@ -117,6 +120,7 @@ class FakeLauncher(Launcher):
         self.tool_installed = tool_installed
         self.auto_start = True  # the agent takes its prompt as soon as it opens
         self.screen: str | None = None  # what capture() returns
+        self.sent: list[tuple[bool, str]] = []  # what send() typed
         self._clock = time.time()  # hook files get strictly increasing times
         self.procs: list[subprocess.Popen[bytes]] = []
         self.commands: list[list[str]] = []
@@ -141,6 +145,10 @@ class FakeLauncher(Launcher):
 
     def capture(self, folder: Path) -> str | None:
         return self.screen
+
+    def send(self, folder: Path, steps: list[tuple[bool, str]]) -> bool:
+        self.sent += steps
+        return self.screen is not None  # no screen: as if tmux weren't installed
 
     def close(self, folder: Path) -> bool:
         self.procs[-1].kill()
@@ -203,7 +211,9 @@ class Harness:
         """A fresh listener process using the same saved state."""
         state = State.load(self.state.path, self.state.limits)
         replier = Replier(OWNER, "pw", state, smtp_factory=FakeSMTP)  # type: ignore[arg-type]
-        return Harness(Relay(self.relay.cfg, state, replier, self.launcher), self.mailbox, self.launcher, state)
+        relay = Relay(self.relay.cfg, state, replier, self.launcher)
+        relay.settle_seconds = 0
+        return Harness(relay, self.mailbox, self.launcher, state)
 
 
 @pytest.fixture
@@ -219,7 +229,9 @@ def harness(cfg: Config, tmp_path: Path) -> Any:
     state = State.load(tmp_path / "state.json", cfg.limits)
     replier = Replier(OWNER, "pw", state, smtp_factory=FakeSMTP)  # type: ignore[arg-type]
     launcher = FakeLauncher(cfg.sessions_dir)
-    h = Harness(Relay(cfg, state, replier, launcher), FakeMailbox(), launcher, state)
+    relay = Relay(cfg, state, replier, launcher)
+    relay.settle_seconds = 0
+    h = Harness(relay, FakeMailbox(), launcher, state)
     yield h
     for p in launcher.procs:
         p.kill()

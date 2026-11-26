@@ -25,6 +25,7 @@ class Task:
     tool: str
     title: str
     prompt: str = ""
+    body_cut: bool = False  # the email body was over the download limit; only its start was used
     hash: str = ""  # for duplicate detection; cleared if the session never starts
 
 

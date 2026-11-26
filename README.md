@@ -13,8 +13,9 @@ Body:    Compare AT-SPI with the alternatives and write up the findings.
 ```
 
 AgentRelay watches a Gmail inbox. For each genuine task email it creates a new session folder, saves the
-prompt there as `prompt.md`, and opens a terminal window running `claude "<prompt>"` (or `codex`). Only one
-session runs at a time; others wait in a short queue.
+prompt there as `prompt.md`, and opens a terminal window running `claude "<prompt>"` (or `codex`). A prompt too long to
+pass that way (over 100 KB) is replaced by an instruction to read `prompt.md`. Only one session runs at a time;
+others wait in a short queue.
 
 It uses only the Python standard library.
 
@@ -51,15 +52,21 @@ the 30th says the limit was reached.
 
 ### Email commands
 
-Emails with an `agent:` subject control AgentRelay itself (same sender check; the body is ignored). They are
-answered straight away, never queued, and count towards the flood breaker and reply budget like tasks.
+Emails with an `agent:` subject control AgentRelay itself (same sender check; only `agent: type` reads the
+body). They are answered straight away, never queued, and count towards the flood breaker and reply budget like tasks.
 
 | Subject | Reply |
 |---|---|
 | `agent: status` | what is running and for how long, the queue, replies left today |
-| `agent: stop` | closes the running session (with its last message); the next task starts |
+| `agent: stop` | closes the running session (with its last message); the next task starts, and the stopped task can be sent again |
 | `agent: screen` | what is on the running session's screen (needs tmux) |
+| `agent: type <text>` | types the text into the session and presses Enter, then replies with the screen (needs tmux). Text missing from the subject is taken from the body's first line |
+| `agent: keys <keys>` | presses keys, e.g. `agent: keys down down enter`, then replies with the screen (needs tmux). Keys: `enter`, `esc`, `tab`, `shift-tab`, `space`, `backspace`, arrows, `ctrl-<letter>`, or any single character |
 | `agent: help` | the list of commands |
+
+`type` and `keys` answer whatever a session is stuck on (an update question, a login code, a menu): send
+`agent: screen` to see it, then reply to it. Typing into a session that hasn't taken its prompt yet restarts its
+3-minute clock. Don't type passwords this way; they would stay in your sent mail.
 
 ## Security model
 
@@ -168,7 +175,7 @@ State (handled emails, queue, reply count) lives in `~/.local/state/agent-relay/
 - One IMAP connection, kept quiet with **IDLE**: Gmail pushes a notification when mail arrives; there is no
   polling. The connection is refreshed every 10 minutes.
 - The search runs on Gmail's side (sender and subject word), then only headers are fetched to decide, then only
-  the text part of an accepted email (capped at 100 KB).
+  the text part of an accepted email (capped at 1 MB; the Started reply says if a body was cut off).
 - The inbox is opened read-only: nothing is marked read, moved or deleted.
 - Network failures back off 30 s, 1, 2, 4… up to 30 minutes; Gmail refusals (connection limits, security
   alerts) wait the full 30 minutes at once; a dead connection is detected within 60 seconds.
