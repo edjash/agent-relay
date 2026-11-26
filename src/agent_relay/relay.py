@@ -41,7 +41,18 @@ from agent_relay.watch import FolderWatch
 
 log = logging.getLogger(__name__)
 
-SUBJECT_RE = re.compile(r"^\s*(claude|codex)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
+SUBJECT_RE = re.compile(r"^\s*(claude|codex|agent)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
+# "agent: <command>" emails control AgentRelay itself.
+COMMANDS_HELP = """\
+Commands (send as the email subject; the body is ignored):
+  agent: status   what is running, the queue, replies left today
+  agent: stop     close the running session now; the next task starts
+  agent: screen   what is on the running session's screen
+  agent: help     this list
+
+Tasks: 'claude: <task>' or 'codex: <task>', with more detail in the body if needed."""
+# Sessions AgentRelay closed itself (it has already replied about them).
+CLOSED_BY_RELAY = ("abandoned", "finished", "stopped")
 
 # Gmail drops IDLE after ~30 min; restart it (and do one check) before that.
 IDLE_SECONDS = 10 * 60
@@ -173,7 +184,7 @@ class Relay:
         subject = str(f.msg.get("Subject", ""))
         m = SUBJECT_RE.match(subject)
         if not m:
-            return  # "claude"/"codex" elsewhere in the subject
+            return  # "claude"/"codex"/"agent" elsewhere in the subject
         tool, title = m.group(1).lower(), m.group(2).strip()
         msg_id = str(f.msg.get("Message-ID", "")).strip() or f"uid:{f.uid}"
         if msg_id in self.state.processed:
@@ -195,6 +206,9 @@ class Relay:
         self.arrivals.append(f.received)
         if len(self.arrivals) > self.limits.flood_count:
             self.trip_flood_breaker(task)
+            return
+        if tool == "agent":
+            self.run_command(task)
             return
         if len(self.state.queue) >= self.limits.queue_max:
             log.warning("  Refused: queue full (%d waiting)", self.limits.queue_max)
@@ -227,6 +241,65 @@ class Relay:
                 f"Queued: position {position} of at most {self.limits.queue_max}. "
                 "It will start when the sessions ahead of it have closed.",
             )
+
+    # ---- agent: commands
+
+    def run_command(self, task: Task) -> None:
+        """Answer an "agent: <command>" email. Commands count towards the flood
+        breaker and the reply budget like tasks, but never queue."""
+        command = task.title.split()[0].lower() if task.title.split() else ""
+        log.info("  Command: %s", command or "(none)")
+        if command == "status":
+            self.replier.reply(task, self.status_text())
+        elif command == "stop":
+            self.replier.reply(task, self.stop_session())
+        elif command == "screen":
+            self.replier.reply(task, self.screen_text())
+        elif command == "help":
+            self.replier.reply(task, COMMANDS_HELP)
+        else:
+            unknown = f"Unknown command '{command}'." if command else "No command given."
+            self.replier.reply(task, f"{unknown}\n\n{COMMANDS_HELP}")
+
+    def status_text(self) -> str:
+        lines = []
+        if self.paused:
+            lines.append("PAUSED after a flood: nothing starts until AgentRelay is restarted.")
+        r = self.running
+        if r is None:
+            lines.append("Running: nothing")
+        else:
+            waiting = " (waiting for it to take the prompt)" if r.phase == "starting" else ""
+            took = duration(time.time() - r.started)
+            lines.append(f"Running: {r.task.tool}: {r.task.title[:80]} ({took}){waiting}\n  {r.folder}")
+        lines.append(f"Queue: {len(self.state.queue)} of {self.limits.queue_max}")
+        lines += [f"  {i}. {t.tool}: {t.title[:80]}" for i, t in enumerate(self.state.queue, 1)]
+        # +1: this reply is about to be sent
+        lines.append(
+            f"Replies: {self.state.replies_in_window() + 1} of {self.limits.reply_budget} used in the last 24 hours"
+        )
+        return "\n".join(lines)
+
+    def stop_session(self) -> str:
+        r = self.running
+        if r is None or r.phase in CLOSED_BY_RELAY:
+            return "Nothing is running."
+        took = duration(time.time() - r.started)
+        log.info("  Stopping %s after %s", r.task.tool, took)
+        stop = r.read_stop()
+        summary = self._summary(r, stop) if r.phase == "running" else ""
+        self._set_phase(r, "stopped")
+        self._close_agent(r)
+        return f"Stopped {r.task.tool} after {took}: {r.task.title[:80]}{summary}"
+
+    def screen_text(self) -> str:
+        r = self.running
+        if r is None:
+            return "Nothing is running."
+        screen = self.launcher.capture(r.folder)
+        if not screen:
+            return "Couldn't read the screen (is tmux installed?)."
+        return f"{r.task.tool}: {r.task.title[:80]}\n\n{_last_lines(screen, MAX_SCREEN_LINES)}"
 
     def trip_flood_breaker(self, task: Task) -> None:
         self.paused = True
@@ -369,7 +442,7 @@ class Relay:
 
     def _set_phase(self, r: RunningSession, phase: str) -> None:
         r.phase = phase
-        if phase in ("abandoned", "finished") and r.watch:
+        if phase in CLOSED_BY_RELAY and r.watch:
             r.watch.close()
             r.watch = None
         if self.state.listener.get("running"):
@@ -412,7 +485,7 @@ class Relay:
         self._remove_if_empty(r)
 
     def _reply_closed(self, r: RunningSession) -> None:
-        if r.phase in ("abandoned", "finished"):
+        if r.phase in CLOSED_BY_RELAY:
             return  # AgentRelay closed it and has already replied
         if r.phase == "starting":
             log.info("Session closed before it took the prompt")

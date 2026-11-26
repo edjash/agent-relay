@@ -45,9 +45,21 @@ To carry on with a closed session, run `claude --continue` or `codex resume` in 
 **Triggering**: the subject must start with `claude:` or `codex:` (any case). The rest of the subject and the
 plain-text body become the prompt. Attachments are never downloaded.
 
-**Replies** go back in the same thread, shown as from "AgentRelay" and starting "AgentRelay Message:", always to the verified sender (never a claimed `Reply-To`), and carry
+**Replies** go back in the same thread, shown as from "AgentRelay", always to the verified sender (never a claimed `Reply-To`), and carry
 an `X-Agent-Relay` header so a reply can never trigger a session. At most 30 replies are sent in any 24 hours;
 the 30th says the limit was reached.
+
+### Email commands
+
+Emails with an `agent:` subject control AgentRelay itself (same sender check; the body is ignored). They are
+answered straight away, never queued, and count towards the flood breaker and reply budget like tasks.
+
+| Subject | Reply |
+|---|---|
+| `agent: status` | what is running and for how long, the queue, replies left today |
+| `agent: stop` | closes the running session (with its last message); the next task starts |
+| `agent: screen` | what is on the running session's screen (needs tmux) |
+| `agent: help` | the list of commands |
 
 ## Security model
 

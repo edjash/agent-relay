@@ -25,7 +25,7 @@ MAX_BODY_BYTES = 100_000
 # Header on our own replies; mail carrying it is never treated as a task.
 REPLY_HEADER = "X-Agent-Relay"
 # Server-side pre-filter so ordinary mail is never downloaded.
-SUBJECT_TERMS = 'OR SUBJECT "claude" SUBJECT "codex"'
+SUBJECT_TERMS = 'OR SUBJECT "claude" OR SUBJECT "codex" SUBJECT "agent"'
 # IMAP dates need English month names whatever the system locale is.
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -64,7 +64,7 @@ class Gmail:
             yield Gmail(imap)
 
     def search_tasks(self, senders: Collection[str], since: date) -> list[str]:
-        """UIDs of inbox mail from the senders, with claude/codex in the subject,
+        """UIDs of inbox mail from the senders, with claude/codex/agent in the subject,
         received on or after `since` (a date in Gmail's timezone)."""
         self.imap.select("INBOX", readonly=True)
         typ, data = self.imap.uid("SEARCH", "SINCE", imap_date(since), sender_terms(senders), SUBJECT_TERMS)

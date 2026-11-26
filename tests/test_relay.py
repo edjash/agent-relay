@@ -29,7 +29,7 @@ def test_task_starts_a_session_and_replies(harness: Harness) -> None:
     assert harness.replies == [f"Started claude in {folder}"]
     reply = FakeSMTP.sent[0]
     assert reply["From"] == "AgentRelay <owner@example.com>"
-    assert reply.get_content().startswith(f"AgentRelay Message: Started claude in {folder}")
+    assert reply.get_content().startswith(f"Started claude in {folder}")
     assert reply["To"] == "owner@example.com"
     assert reply["Subject"] == "Re: claude: summarise the report"
     assert reply["In-Reply-To"] == "<m1@example.com>"
@@ -359,3 +359,75 @@ def test_folder_of_a_session_that_never_started_is_removed(harness: Harness) -> 
     harness.cycle()
     harness.cycle()
     assert not r.folder.exists()
+
+
+def test_agent_help_and_unknown_commands(harness: Harness) -> None:
+    harness.mailbox.add("agent: help", "")
+    harness.mailbox.add("agent: dance", "")
+    harness.cycle()
+    assert harness.full_replies[0].startswith("Commands (send as the email subject")
+    assert harness.full_replies[1].startswith("Unknown command 'dance'.\n\nCommands")
+    assert harness.relay.running is None and not harness.state.queue  # commands never queue
+
+
+def test_agent_commands_ignore_case_and_spacing(harness: Harness) -> None:
+    for subject in ("agent:help", "AGENT:HELP", "Agent :  Help"):
+        harness.mailbox.add(subject, "")
+    harness.cycle()
+    assert len(harness.full_replies) == 3
+    assert all(r.startswith("Commands (send as the email subject") for r in harness.full_replies)
+
+
+def test_agent_status(harness: Harness) -> None:
+    harness.mailbox.add("claude: first task", "x")
+    harness.mailbox.add("codex: second task", "y")
+    harness.cycle()
+    harness.mailbox.add("agent: status", "")
+    harness.cycle()
+    status = harness.full_replies[-1]
+    assert status.startswith("Running: claude: first task (0 sec)")
+    assert "Queue: 1 of 5\n  1. codex: second task" in status
+    assert status.endswith(f"Replies: {len(harness.replies)} of 30 used in the last 24 hours")
+
+
+def test_agent_stop_closes_the_session_and_starts_the_next(harness: Harness) -> None:
+    harness.mailbox.add("agent: stop", "")
+    harness.cycle()
+    assert harness.full_replies[-1] == "Nothing is running."
+
+    harness.mailbox.add("claude: going wrong", "x")
+    harness.mailbox.add("codex: next", "y")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    harness.launcher.agent_finishes("Half way through")
+    harness.launcher.agent_works()  # still working
+    harness.mailbox.add("agent: stop", "")
+    harness.cycle()
+    stopped = harness.full_replies[-1]
+    assert stopped.startswith(
+        "Stopped claude after 0 sec: going wrong\n\nLast message from claude:\n\nHalf way through"
+    )
+    assert r.phase == "stopped" and r.proc.poll() is not None
+    harness.cycle()  # closed: no extra reply; the next task starts
+    assert not any(x.startswith(("Session closed", "Finished")) for x in harness.replies)
+    assert harness.relay.running is not None and harness.relay.running.task.tool == "codex"
+
+
+def test_agent_screen(harness: Harness) -> None:
+    harness.mailbox.add("agent: screen", "")
+    harness.cycle()
+    assert harness.full_replies[-1] == "Nothing is running."
+    harness.mailbox.add("claude: long job", "x")
+    harness.cycle()
+    harness.launcher.screen = "Building... 42%"
+    harness.mailbox.add("agent: screen", "")
+    harness.cycle()
+    assert harness.full_replies[-1] == "claude: long job\n\nBuilding... 42%"
+
+
+def test_commands_count_towards_the_flood_breaker(harness: Harness) -> None:
+    for i in range(11):
+        harness.mailbox.add(f"agent: status {i}", "")
+    harness.cycle()
+    assert harness.relay.paused

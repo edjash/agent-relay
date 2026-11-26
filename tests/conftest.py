@@ -20,7 +20,7 @@ import pytest
 from agent_relay.config import Config
 from agent_relay.gmail import Gmail
 from agent_relay.relay import Relay
-from agent_relay.replies import MESSAGE_PREFIX, Replier
+from agent_relay.replies import Replier
 from agent_relay.sessions import Launcher
 from agent_relay.state import State
 
@@ -183,13 +183,13 @@ class Harness:
 
     @property
     def replies(self) -> list[str]:
-        """First line of each reply, without the "AgentRelay Message: " prefix."""
-        return [m.get_content().splitlines()[0].removeprefix(MESSAGE_PREFIX) for m in FakeSMTP.sent]
+        """First line of each reply."""
+        return [m.get_content().splitlines()[0] for m in FakeSMTP.sent]
 
     @property
     def full_replies(self) -> list[str]:
-        """Each reply's whole text, without the prefix or the final newline."""
-        return [m.get_content().removeprefix(MESSAGE_PREFIX).rstrip("\n") for m in FakeSMTP.sent]
+        """Each reply's whole text, without the final newline."""
+        return [m.get_content().rstrip("\n") for m in FakeSMTP.sent]
 
     def cycle(self) -> None:
         """One pass of the listener loop."""

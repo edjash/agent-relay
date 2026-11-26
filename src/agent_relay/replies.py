@@ -16,9 +16,8 @@ log = logging.getLogger(__name__)
 
 SMTP_HOST, SMTP_PORT = "smtp.gmail.com", 465
 # How replies identify themselves: the sender name shown in Gmail (the address
-# stays the account's own) and a prefix on the first line of the text.
+# stays the account's own).
 SENDER_NAME = "AgentRelay"
-MESSAGE_PREFIX = "AgentRelay Message: "
 
 SmtpFactory = Callable[..., smtplib.SMTP]
 
@@ -59,7 +58,7 @@ class Replier:
             msg["In-Reply-To"] = msg["References"] = task.msg_id
         msg["Message-ID"] = make_msgid(domain="agent-relay.local")
         msg[REPLY_HEADER] = "reply"
-        msg.set_content(MESSAGE_PREFIX + text + "\n")
+        msg.set_content(text + "\n")
 
         first_line = text.splitlines()[0]
         if self.dry_run:
