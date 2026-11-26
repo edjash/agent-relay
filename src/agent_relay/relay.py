@@ -20,6 +20,7 @@ from pathlib import Path
 
 from agent_relay.config import Config
 from agent_relay.gmail import MAX_BODY_BYTES, REPLY_HEADER, Fetched, Gmail
+from agent_relay.render import pre
 from agent_relay.replies import Replier
 from agent_relay.sessions import (
     ACTIVE_MARKER,
@@ -50,17 +51,19 @@ AGENT_PREFIX_RE = re.compile(r"^\s*agent\s*:\s*", re.IGNORECASE)
 SESSION_COMMANDS = ("stop", "type", "keys")
 # "agent: <command>" emails control AgentRelay itself.
 COMMANDS_HELP = """\
-Commands (send as the email subject, or reply to any AgentRelay email with
-just the command, e.g. 'stop' or 'type 1'):
+Commands (reply to any AgentRelay email with just the command, e.g. 'stop' or
+'type: 1', or send 'agent: <command>' as a subject; the colon after the command
+is optional):
   agent: status         what is running, the queue, replies left today
   agent: stop           close the running session now; the next task starts
   agent: screen         what is on the running session's screen
-  agent: type <text>    type into the session and press Enter (or put the text
+  agent: type: <text>   type into the session and press Enter (or put the text
                         on the body's first line); replies with the screen
-  agent: keys <keys>    press keys, e.g. 'agent: keys down down enter'; replies
+  agent: keys: <keys>   press keys, e.g. 'keys: down down enter'; replies
                         with the screen. Keys: enter, esc, tab, shift-tab, space,
                         backspace, up, down, left, right, ctrl-<letter>, or
                         any single character
+  agent: reset          reset the reply count after the daily limit is reached
   agent: help           this list
 
 Tasks: 'claude: <task>' or 'codex: <task>', with more detail in the body if needed.
@@ -311,8 +314,10 @@ class Relay:
         """Answer an "agent: <command>" email. Commands count towards the flood
         breaker and the reply budget like tasks, but never queue. `thread` holds
         the Message-IDs a reply refers to, when it was sent in a task's thread."""
-        command, _, rest = task.title.partition(" ")
-        command, rest = command.lower(), rest.strip()
+        # "type hello", "type: hello" and "type:hello" all work.
+        m = re.match(r"\s*([A-Za-z]+)(?:\s*:|\s+|$)(.*)", task.title, re.DOTALL)
+        words = task.title.split()
+        command, rest = (m.group(1).lower(), m.group(2).strip()) if m else (words[0].lower() if words else "", "")
         log.info("  Command: %s", command or "(none)")
         r = self.running
         if thread is not None and command in SESSION_COMMANDS and (r is None or r.task.msg_id not in thread):
@@ -334,11 +339,19 @@ class Relay:
             self.replier.reply(task, self.type_text(rest))
         elif command == "keys":
             self.replier.reply(task, self.press_keys(rest))
+        elif command == "reset":
+            used = self.state.replies_in_window()
+            self.state.replies.clear()
+            self.state.save()
+            log.info("  Reply count reset (%d used)", used)
+            self.replier.reply(
+                task, f"Reply count reset: {used} used, now 0 of {self.limits.reply_budget} for the next 24 hours."
+            )
         elif command == "help":
-            self.replier.reply(task, COMMANDS_HELP)
+            self.replier.reply(task, pre(COMMANDS_HELP))
         else:
             unknown = f"Unknown command '{command}'." if command else "No command given."
-            self.replier.reply(task, f"{unknown}\n\n{COMMANDS_HELP}")
+            self.replier.reply(task, f"{unknown}\n\n{pre(COMMANDS_HELP)}")
 
     def status_text(self) -> str:
         lines = []
@@ -389,9 +402,9 @@ class Relay:
             elif len(word) == 1:
                 steps.append((True, word))
             else:
-                return f"Unknown key '{word}'; nothing was pressed.\n\n{COMMANDS_HELP}"
+                return f"Unknown key '{word}'; nothing was pressed.\n\n{pre(COMMANDS_HELP)}"
         if not steps:
-            return f"No keys given.\n\n{COMMANDS_HELP}"
+            return f"No keys given.\n\n{pre(COMMANDS_HELP)}"
         return self._send(steps, f"Pressed {spec}.")
 
     def _send(self, steps: list[tuple[bool, str]], done: str) -> str:
@@ -418,7 +431,7 @@ class Relay:
         screen = self.launcher.capture(r.folder)
         if not screen:
             return "Couldn't read the screen (is tmux installed?)."
-        return f"{r.task.tool}: {r.task.title[:80]}\n\n{_last_lines(screen, MAX_SCREEN_LINES)}"
+        return f"{r.task.tool}: {r.task.title[:80]}\n\n{pre(_last_lines(screen, MAX_SCREEN_LINES))}"
 
     def trip_flood_breaker(self, task: Task) -> None:
         self.paused = True
@@ -516,7 +529,7 @@ class Relay:
             "'agent: type <text>' or 'agent: keys <keys>', or send a new task to close it and move on. "
             "'agent: stop' closes it too."
         )
-        text += f"\n\n{_last_lines(screen, MAX_SCREEN_LINES)}" if screen else "\n\n(Couldn't read its screen.)"
+        text += f"\n\n{pre(_last_lines(screen, MAX_SCREEN_LINES))}" if screen else "\n\n(Couldn't read its screen.)"
         self.replier.reply(r.task, text)
 
     def check_finished(self) -> None:
@@ -560,7 +573,7 @@ class Relay:
             last = last.strip()
             if len(last) > MAX_LAST_MESSAGE:
                 last = last[:MAX_LAST_MESSAGE].rstrip() + "\n[...cut short]"
-            text += f"\n\nLast message from {r.task.tool}:\n\n{last}"
+            text += f"\n\nLast message from {r.task.tool}:\n\n{pre(last)}"
         if nothing_created(r.folder):
             gone = ", so the session folder has been removed" if closing else ""
             return text + f"\n\nNo files were created{gone}."
@@ -568,7 +581,7 @@ class Relay:
         listing = "\n".join(f"  {f}" for f in files) or "  (no files)"
         if more:
             listing += f"\n  ...and {more} more"
-        return text + f"\n\nFiles in {r.folder}:\n{listing}"
+        return text + f"\n\nFiles in {r.folder}:\n{pre(listing)}"
 
     def _set_phase(self, r: RunningSession, phase: str) -> None:
         r.phase = phase

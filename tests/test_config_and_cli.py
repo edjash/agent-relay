@@ -87,7 +87,7 @@ def test_filled_env_loads(paths: Path) -> None:
     assert cfg.sessions_dir == Path("/tmp/sessions-test")
     assert cfg.limits.queue_max == 3
     assert cfg.limits.flood_window == timedelta(minutes=5)
-    assert cfg.limits.reply_budget == 30  # default
+    assert cfg.limits.reply_budget == 100  # default
     assert cfg.tool_args == {"claude": (), "codex": ("--yolo", "-c", 'model="o3 mini"')}
     assert "abcd" not in repr(cfg)  # the password never shows up in logs
 

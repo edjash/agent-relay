@@ -49,9 +49,10 @@ To carry on with a closed session, run `claude --continue` or `codex resume` in 
 **Triggering**: the subject must start with `claude:` or `codex:` (any case). The rest of the subject and the
 plain-text body become the prompt. Attachments are never downloaded.
 
-**Replies** go back in the same thread, shown as from "AgentRelay", always to the verified sender (never a claimed `Reply-To`), and carry
-an `X-Agent-Relay` header so a reply can never trigger a session. At most 30 replies are sent in any 24 hours;
-the 30th says the limit was reached.
+**Replies** go back in the same thread, shown as from "AgentRelay", as HTML (screens and the agent's last
+message in monospace boxes, a command reference at the foot) with a plain-text copy, always to the verified sender (never a claimed `Reply-To`), and carry
+an `X-Agent-Relay` header so a reply can never trigger a session. At most 100 replies are sent in any 24 hours;
+the last one says the limit was reached.
 
 ### Email commands
 
@@ -65,10 +66,12 @@ body). They are answered straight away, never queued, and count towards the floo
 | `agent: screen` | what is on the running session's screen (needs tmux) |
 | `agent: type <text>` | types the text into the session and presses Enter, then replies with the screen (needs tmux). Text missing from the subject is taken from the body's first line |
 | `agent: keys <keys>` | presses keys, e.g. `agent: keys down down enter`, then replies with the screen (needs tmux). Keys: `enter`, `esc`, `tab`, `shift-tab`, `space`, `backspace`, arrows, `ctrl-<letter>`, or any single character |
+| `agent: reset` | resets the reply count, for when the daily reply limit has been reached |
 | `agent: help` | the list of commands |
 
 You can also **reply** to any AgentRelay email (or task email) with just the command on the first line,
-such as `stop`, `screen` or `type 1`; a leading `agent:` is fine too. It works exactly like the `agent:` subject,
+such as `stop`, `screen` or `type: 1`; a leading `agent:` is fine too, and so is leaving out the colon after
+the command (`type 1`). It works exactly like the `agent:` subject,
 and the quoted text below is ignored. A reply is never treated as a new task. `stop`, `type` and `keys` sent in
 a task's thread only act on that task's session: in the thread of a session that has ended they do nothing and
 say so. (Replies in an `agent:` thread act on whatever is running.)
@@ -173,7 +176,7 @@ typo can't silently fall back to a default. To keep `.env` somewhere else, set `
 | `AGENT_RELAY_MAX_AGE_HOURS` | 24 | ignore older task emails |
 | `AGENT_RELAY_QUEUE_MAX` | 5 | tasks allowed to wait |
 | `AGENT_RELAY_FLOOD_COUNT` / `_FLOOD_WINDOW_MINUTES` | 10 / 10 | flood breaker threshold |
-| `AGENT_RELAY_REPLY_BUDGET` | 30 | replies per rolling 24 hours |
+| `AGENT_RELAY_REPLY_BUDGET` | 100 | replies per rolling 24 hours |
 | `AGENT_RELAY_DUPLICATE_WINDOW_MINUTES` | 60 | identical task ignored within this window |
 | `AGENT_RELAY_LOG_LEVEL` / `_LOG_FILE` | `INFO` / none | |
 

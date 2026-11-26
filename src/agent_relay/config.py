@@ -58,7 +58,7 @@ AGENT_RELAY_MAX_AGE_HOURS=24             # ignore task emails received longer ag
 AGENT_RELAY_QUEUE_MAX=5                  # tasks allowed to wait; more are refused without a reply
 AGENT_RELAY_FLOOD_COUNT=10               # more than this many task emails...
 AGENT_RELAY_FLOOD_WINDOW_MINUTES=10      # ...within this window pauses the relay until restarted
-AGENT_RELAY_REPLY_BUDGET=30              # replies allowed per rolling 24 hours
+AGENT_RELAY_REPLY_BUDGET=100             # replies allowed per rolling 24 hours
 AGENT_RELAY_DUPLICATE_WINDOW_MINUTES=60  # the same task again within this window is ignored
 
 # Logging (optional).
@@ -87,7 +87,7 @@ class Limits:
     queue_max: int = 5
     flood_count: int = 10
     flood_window: timedelta = timedelta(minutes=10)
-    reply_budget: int = 30
+    reply_budget: int = 100
     reply_window: timedelta = timedelta(hours=24)
     duplicate_window: timedelta = timedelta(minutes=60)
     processed_keep: timedelta = timedelta(days=7)
@@ -202,7 +202,7 @@ def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
             queue_max=_positive_int(values, "QUEUE_MAX", 5),
             flood_count=_positive_int(values, "FLOOD_COUNT", 10),
             flood_window=timedelta(minutes=_positive_int(values, "FLOOD_WINDOW_MINUTES", 10)),
-            reply_budget=_positive_int(values, "REPLY_BUDGET", 30),
+            reply_budget=_positive_int(values, "REPLY_BUDGET", 100),
             duplicate_window=timedelta(minutes=_positive_int(values, "DUPLICATE_WINDOW_MINUTES", 60)),
         ),
         log_level=(values.get(PREFIX + "LOG_LEVEL", "").strip() or "INFO").upper(),

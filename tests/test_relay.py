@@ -4,7 +4,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from conftest import FakeLauncher, FakeSMTP, Harness
+from conftest import FakeLauncher, FakeSMTP, Harness, plain
 
 from agent_relay.gmail import REPLY_HEADER
 
@@ -29,7 +29,7 @@ def test_task_starts_a_session_and_replies(harness: Harness) -> None:
     assert harness.replies == [f"Started claude in {folder}"]
     reply = FakeSMTP.sent[0]
     assert reply["From"] == "AgentRelay <owner@example.com>"
-    assert reply.get_content().startswith(f"Started claude in {folder}")
+    assert plain(reply).startswith(f"Started claude in {folder}")
     assert reply["To"] == "owner@example.com"
     assert reply["Subject"] == "Re: claude: summarise the report"
     assert reply["In-Reply-To"] == "<m1@example.com>"
@@ -170,11 +170,11 @@ def test_closing_a_session_replies_with_files_and_starts_the_next(harness: Harne
     harness.launcher.end_session()
     harness.cycle()
 
-    closed = next(m for m in FakeSMTP.sent if "Session closed" in m.get_content())
+    closed = next(m for m in FakeSMTP.sent if "Session closed" in plain(m))
     assert closed["Subject"] == "Re: claude: first"
-    assert "  report.md" in closed.get_content()
-    assert "settings.json" not in closed.get_content()
-    assert "prompt.md" not in closed.get_content()
+    assert "  report.md" in plain(closed)
+    assert "settings.json" not in plain(closed)
+    assert "prompt.md" not in plain(closed)
     assert harness.relay.running is not None
     assert harness.relay.running.task.tool == "codex"
 
@@ -250,13 +250,13 @@ def test_flood_pauses_clears_queue_and_alerts_once(harness: Harness) -> None:
 
 
 def test_reply_budget_ends_with_a_notice_then_silence(harness: Harness) -> None:
-    harness.state.replies = [time.time()] * 28
+    harness.state.replies = [time.time()] * 98
     for subject in ("claude:", "codex:", "claude: "):
         harness.mailbox.add(subject, "")
     harness.cycle()
     assert harness.replies == [
         "This email has no task in it. Put the task after 'claude:' in the subject, or in the body, and send it again.",
-        "Reply limit reached: 30 replies in the last 24 hours.",
+        "Reply limit reached: 100 replies in the last 24 hours.",
     ]
 
 
@@ -469,7 +469,7 @@ def test_agent_help_and_unknown_commands(harness: Harness) -> None:
     harness.mailbox.add("agent: help", "")
     harness.mailbox.add("agent: dance", "")
     harness.cycle()
-    assert harness.full_replies[0].startswith("Commands (send as the email subject")
+    assert harness.full_replies[0].startswith("Commands (reply to any AgentRelay email")
     assert harness.full_replies[1].startswith("Unknown command 'dance'.\n\nCommands")
     assert harness.relay.running is None and not harness.state.queue  # commands never queue
 
@@ -479,7 +479,7 @@ def test_agent_commands_ignore_case_and_spacing(harness: Harness) -> None:
         harness.mailbox.add(subject, "")
     harness.cycle()
     assert len(harness.full_replies) == 3
-    assert all(r.startswith("Commands (send as the email subject") for r in harness.full_replies)
+    assert all(r.startswith("Commands (reply to any AgentRelay email") for r in harness.full_replies)
 
 
 def test_agent_status(harness: Harness) -> None:
@@ -491,7 +491,7 @@ def test_agent_status(harness: Harness) -> None:
     status = harness.full_replies[-1]
     assert status.startswith("Running: claude: first task (0 sec)")
     assert "Queue: 1 of 5\n  1. codex: second task" in status
-    assert status.endswith(f"Replies: {len(harness.replies)} of 30 used in the last 24 hours")
+    assert status.endswith(f"Replies: {len(harness.replies)} of 100 used in the last 24 hours")
 
 
 def test_agent_stop_closes_the_session_and_starts_the_next(harness: Harness) -> None:
@@ -630,3 +630,45 @@ def test_commands_count_towards_the_flood_breaker(harness: Harness) -> None:
         harness.mailbox.add(f"agent: status {i}", "")
     harness.cycle()
     assert harness.relay.paused
+
+
+def test_commands_take_an_optional_colon(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.launcher.screen = "?"
+    uid = harness.mailbox.add("claude: job", "x")
+    harness.cycle()
+    refs = f"References: <m{uid}@example.com>\r\n"
+    harness.mailbox.add("Re: claude: job", "type: a:b c", extra_headers=refs)
+    harness.mailbox.add("Re: claude: job", "keys:enter", extra_headers=refs)
+    harness.mailbox.add("agent: keys : esc", "")
+    harness.mailbox.add("agent: type2", "")
+    harness.cycle()
+    assert harness.launcher.sent == [(True, "a:b c"), (False, "Enter"), (False, "Enter"), (False, "Escape")]
+    assert harness.full_replies[-1].startswith("Unknown command 'type2'.")
+
+
+def test_replies_have_an_html_part_with_boxes_and_a_command_footer(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.launcher.screen = "<b>Log in</b> & go"
+    harness.mailbox.add("claude: job", "x")
+    harness.cycle()
+    assert harness.relay.running is not None
+    harness.relay.running.started -= 11
+    harness.cycle()
+    msg = FakeSMTP.sent[-1]
+    text = plain(msg)
+    assert "\x02" not in text and "\x03" not in text and text.endswith("<b>Log in</b> & go\n")
+    html_part = msg.get_body(("html",))
+    assert html_part is not None
+    page = html_part.get_content()  # type: ignore[attr-defined]
+    assert "<pre" in page and "&lt;b&gt;Log in&lt;/b&gt; &amp; go</pre>" in page
+    assert '<p style="margin:0 0 12px;font-weight:600">Waiting for input' in page
+    assert "Reply with a command:" in page and "type: &lt;text&gt;" in page
+
+
+def test_agent_reset_clears_the_reply_count(harness: Harness) -> None:
+    harness.state.replies = [time.time()] * 100  # limit reached: nothing is being sent
+    harness.mailbox.add("agent: reset", "")
+    harness.cycle()
+    assert harness.full_replies == ["Reply count reset: 100 used, now 0 of 100 for the next 24 hours."]
+    assert len(harness.state.replies) == 1  # just that reply

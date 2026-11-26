@@ -10,6 +10,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 
 from agent_relay.gmail import NETWORK_TIMEOUT, REPLY_HEADER
+from agent_relay.render import to_html, to_plain
 from agent_relay.state import State, Task
 
 log = logging.getLogger(__name__)
@@ -58,9 +59,10 @@ class Replier:
             msg["In-Reply-To"] = msg["References"] = task.msg_id
         msg["Message-ID"] = make_msgid(domain="agent-relay.local")
         msg[REPLY_HEADER] = "reply"
-        msg.set_content(text + "\n")
+        msg.set_content(to_plain(text) + "\n")
+        msg.add_alternative(to_html(text), subtype="html")
 
-        first_line = text.splitlines()[0]
+        first_line = to_plain(text).splitlines()[0]
         if self.dry_run:
             log.info("  [dry run] would reply: %s", first_line)
             return

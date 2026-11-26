@@ -93,6 +93,13 @@ class FakeMailbox:
         return "OK", [(b"1 (UID %s BODY[1]<0> {%d}" % (target.encode(), len(body)), body), b")"]
 
 
+def plain(msg: EmailMessage) -> str:
+    """A reply's plain-text part."""
+    part = msg.get_body(("plain",))
+    assert part is not None
+    return str(part.get_content())  # type: ignore[attr-defined]
+
+
 class FakeSMTP:
     sent: ClassVar[list[EmailMessage]] = []
 
@@ -192,12 +199,12 @@ class Harness:
     @property
     def replies(self) -> list[str]:
         """First line of each reply."""
-        return [m.get_content().splitlines()[0] for m in FakeSMTP.sent]
+        return [plain(m).splitlines()[0] for m in FakeSMTP.sent]
 
     @property
     def full_replies(self) -> list[str]:
         """Each reply's whole text, without the final newline."""
-        return [m.get_content().rstrip("\n") for m in FakeSMTP.sent]
+        return [plain(m).rstrip("\n") for m in FakeSMTP.sent]
 
     def cycle(self) -> None:
         """One pass of the listener loop."""
