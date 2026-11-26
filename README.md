@@ -81,6 +81,19 @@ say so. (Replies in an `agent:` thread act on whatever is running.)
 itself; a new `claude:` or `codex:` task closes it and starts instead. Don't type passwords this way; they would
 stay in your sent mail.
 
+### When a login expires
+
+An agent whose login has expired can't take the prompt, so you get a "waiting for input" reply showing its
+login screen. What you can do from there depends on the agent:
+
+- **Codex** offers a device-code sign-in. Pick it with `keys:` (for example `keys: down enter`); the screen in
+  the reply shows a web address and a one-time code. Open the address on your phone, sign in there and enter
+  the code. Codex then logs in and carries on with the task. No password goes through email.
+- **Claude** needs its login finished on the computer itself, so email alone can't do it. Set up a way to
+  reach the desktop remotely (for example Chrome Remote Desktop, or SSH and `tmux -L agent-relay attach`),
+  log in in the session's window, and the task carries on. Until then, the email tells you a login is needed,
+  and you can send the task to `codex:` instead.
+
 ## Security model
 
 A task email makes an agent run on your machine, so AgentRelay only accepts mail it can prove is genuine:

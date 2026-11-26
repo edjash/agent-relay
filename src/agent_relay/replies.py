@@ -56,7 +56,11 @@ class Replier:
         msg["To"] = task.sender
         msg["Subject"] = task.subject if task.subject.lower().startswith("re:") else f"Re: {task.subject}"
         if task.msg_id.startswith("<"):
-            msg["In-Reply-To"] = msg["References"] = task.msg_id
+            msg["In-Reply-To"] = task.msg_id
+            # The whole chain, so a reply to this reply still leads back to the task.
+            # (Long chains keep the first ID and the latest ones.)
+            chain = [*task.references.split(), task.msg_id]
+            msg["References"] = " ".join(chain if len(chain) <= 20 else [chain[0], *chain[-19:]])
         msg["Message-ID"] = make_msgid(domain="agent-relay.local")
         msg[REPLY_HEADER] = "reply"
         msg.set_content(to_plain(text) + "\n")

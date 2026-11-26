@@ -672,3 +672,18 @@ def test_agent_reset_clears_the_reply_count(harness: Harness) -> None:
     harness.cycle()
     assert harness.full_replies == ["Reply count reset: 100 used, now 0 of 100 for the next 24 hours."]
     assert len(harness.state.replies) == 1  # just that reply
+
+
+def test_a_reply_to_a_reply_still_belongs_to_the_session(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.launcher.screen = "Log in"
+    uid = harness.mailbox.add("claude: job", "x")
+    harness.cycle()
+    harness.mailbox.add("Re: claude: job", "keys: enter", extra_headers=f"References: <m{uid}@example.com>\r\n")
+    harness.cycle()
+    ours = FakeSMTP.sent[-1]  # "Pressed enter.": answer it as Gmail would, from its own headers only
+    refs = f"{ours['References']} {ours['Message-ID']}"
+    harness.mailbox.add("Re: claude: job", "keys: enter", extra_headers=f"References: {refs}\r\n")
+    harness.cycle()
+    assert harness.full_replies[-1].startswith("Pressed enter.")
+    assert harness.launcher.sent == [(False, "Enter"), (False, "Enter")]

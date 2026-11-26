@@ -25,6 +25,7 @@ class Task:
     tool: str
     title: str
     prompt: str = ""
+    references: str = ""  # Message-IDs of the thread before this email, so replies keep the chain
     preface: str = ""  # put at the start of its first reply (e.g. a stuck session was closed for it)
     body_cut: bool = False  # the email body was over the download limit; only its start was used
     hash: str = ""  # for duplicate detection; cleared if the session never starts

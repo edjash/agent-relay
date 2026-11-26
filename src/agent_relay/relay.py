@@ -240,7 +240,11 @@ class Relay:
 
         # From here every outcome is final for this email.
         self.state.processed[msg_id] = datetime.now().isoformat()
-        task = Task(msg_id=msg_id, sender=sender, subject=subject, tool=tool, title=title)
+        thread_ids = re.findall(r"<[^<>\s]+>", f"{f.msg.get('References', '')} {f.msg.get('In-Reply-To', '')}")
+        thread_ids = list(dict.fromkeys(thread_ids))  # in order, without repeats
+        task = Task(
+            msg_id=msg_id, sender=sender, subject=subject, tool=tool, title=title, references=" ".join(thread_ids)
+        )
         log.info("Mail from %s: %s: %s", sender, tool, title[:60])
 
         if self.paused:
@@ -257,8 +261,7 @@ class Relay:
                 task.title = AGENT_PREFIX_RE.sub("", first).strip()
                 thread = None  # replies in an "agent:" thread act on whatever is running
                 if tool_of_thread != "agent":
-                    refs = f"{f.msg.get('In-Reply-To', '')} {f.msg.get('References', '')}"
-                    thread = set(re.findall(r"<[^<>\s]+>", refs))
+                    thread = set(thread_ids)
                 self.run_command(task, thread=thread)
             else:
                 self.run_command(task, lambda: gmail.fetch_body_text(f.uid))
