@@ -74,7 +74,7 @@ class Gmail:
 
     def fetch_headers(self, uids: list[str]) -> list[Fetched]:
         """Labels, received time and the few headers needed, oldest first."""
-        fields = f"FROM SUBJECT MESSAGE-ID AUTHENTICATION-RESULTS {REPLY_HEADER.upper()}"
+        fields = f"FROM SUBJECT MESSAGE-ID IN-REPLY-TO REFERENCES AUTHENTICATION-RESULTS {REPLY_HEADER.upper()}"
         typ, parts = self.imap.uid(
             "FETCH", ",".join(uids), f"(X-GM-LABELS INTERNALDATE BODY.PEEK[HEADER.FIELDS ({fields})])"
         )

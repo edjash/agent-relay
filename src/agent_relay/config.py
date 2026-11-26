@@ -60,7 +60,6 @@ AGENT_RELAY_FLOOD_COUNT=10               # more than this many task emails...
 AGENT_RELAY_FLOOD_WINDOW_MINUTES=10      # ...within this window pauses the relay until restarted
 AGENT_RELAY_REPLY_BUDGET=30              # replies allowed per rolling 24 hours
 AGENT_RELAY_DUPLICATE_WINDOW_MINUTES=60  # the same task again within this window is ignored
-AGENT_RELAY_START_TIMEOUT_MINUTES=3       # a session that hasn't taken its prompt by then is closed
 
 # Logging (optional).
 AGENT_RELAY_LOG_LEVEL=INFO  # DEBUG, INFO, WARNING or ERROR
@@ -72,7 +71,7 @@ KNOWN_KEYS = frozenset(
     for k in (
         "GMAIL_USER", "APP_PASSWORD", "ALLOWED_SENDERS", "SESSIONS_DIR", "CLAUDE_ARGS", "CODEX_ARGS",
         "MAX_AGE_HOURS", "QUEUE_MAX", "FLOOD_COUNT", "FLOOD_WINDOW_MINUTES",
-        "REPLY_BUDGET", "DUPLICATE_WINDOW_MINUTES", "START_TIMEOUT_MINUTES", "LOG_LEVEL", "LOG_FILE",
+        "REPLY_BUDGET", "DUPLICATE_WINDOW_MINUTES", "LOG_LEVEL", "LOG_FILE",
         "ENV_FILE",
     )
 )  # fmt: skip
@@ -91,7 +90,6 @@ class Limits:
     reply_budget: int = 30
     reply_window: timedelta = timedelta(hours=24)
     duplicate_window: timedelta = timedelta(minutes=60)
-    start_timeout: timedelta = timedelta(minutes=3)
     processed_keep: timedelta = timedelta(days=7)
 
 
@@ -206,7 +204,6 @@ def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
             flood_window=timedelta(minutes=_positive_int(values, "FLOOD_WINDOW_MINUTES", 10)),
             reply_budget=_positive_int(values, "REPLY_BUDGET", 30),
             duplicate_window=timedelta(minutes=_positive_int(values, "DUPLICATE_WINDOW_MINUTES", 60)),
-            start_timeout=timedelta(minutes=_positive_int(values, "START_TIMEOUT_MINUTES", 3)),
         ),
         log_level=(values.get(PREFIX + "LOG_LEVEL", "").strip() or "INFO").upper(),
         log_file=Path(log_file).expanduser() if log_file else None,

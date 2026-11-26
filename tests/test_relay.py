@@ -80,29 +80,58 @@ def test_codex_gets_a_trusted_prompt_hook(harness: Harness) -> None:
     assert not any("codex_hooks" in a for a in cmd)  # deprecated; hooks are on by default
 
 
-def test_session_that_never_takes_its_prompt_is_closed(harness: Harness) -> None:
+def test_stuck_session_says_so_and_stays_open(harness: Harness) -> None:
     harness.launcher.auto_start = False
-    harness.mailbox.add("claude: stuck", "on a login screen")
+    harness.launcher.screen = "Update available! 1. Update 2. Skip"
+    harness.mailbox.add("claude: stuck", "on a question")
     harness.mailbox.add("codex: next", "waiting")
     harness.cycle()
     r = harness.relay.running
     assert r is not None
     assert [x[:7] for x in harness.replies] == ["Queued:"]  # for the codex task; no "Started" yet
-    r.started -= 179
+    r.started -= 9
     harness.cycle()
-    assert r.phase == "starting"  # not yet
-
+    assert len(harness.replies) == 1  # not yet
     r.started -= 2
     harness.cycle()
-    assert r.phase == "abandoned"
-    assert harness.replies[-1].startswith("Didn't start: claude hadn't taken the prompt after 3 min")
-    assert r.task.hash not in harness.state.recent  # can be sent again straight away
-    r.proc.wait(5)
+    assert harness.full_replies[-1].startswith("Waiting for input: claude hasn't taken the prompt.")
+    assert harness.full_replies[-1].endswith("\n\nUpdate available! 1. Update 2. Skip")
+    r.started -= 3600  # an hour later: still open, nothing more sent
+    harness.cycle()
+    assert r.phase == "starting" and r.proc.poll() is None and len(harness.replies) == 2
+
+    harness.launcher.take_prompt()  # answered with "agent: type"; no second "Started" email
+    harness.cycle()
+    assert r.phase == "running" and len(harness.replies) == 2
+
+
+def test_a_new_task_closes_a_stuck_session(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.mailbox.add("claude: stuck", "on a login")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
     harness.launcher.auto_start = True
-    harness.cycle()  # the window has closed: no "Session closed" reply; the next task starts
-    assert not any(x.startswith("Session closed") for x in harness.replies)
+    harness.mailbox.add("codex: instead", "do this")
+    harness.cycle()
+    assert r.phase == "stopped" and r.proc.poll() is not None
+    assert r.task.hash not in harness.state.recent  # can be sent again
+    harness.cycle()
+    assert not r.folder.exists()  # it created nothing
     assert harness.relay.running is not None and harness.relay.running.task.tool == "codex"
-    assert harness.replies[-1].startswith("Started codex")
+    assert harness.full_replies == [
+        "Closed the stuck claude session (stuck).\n\nStarted codex in "
+        f"{harness.relay.running.folder}\nThe prompt is saved there as prompt.md."
+    ]
+
+
+def test_a_new_task_queues_behind_a_running_session(harness: Harness) -> None:
+    harness.mailbox.add("claude: working", "x")
+    harness.cycle()
+    harness.mailbox.add("codex: later", "y")
+    harness.cycle()
+    assert harness.relay.running is not None and harness.relay.running.phase == "running"
+    assert harness.replies[-1].startswith("Queued: position 1")
 
 
 def test_window_closed_before_the_prompt_was_taken(harness: Harness) -> None:
@@ -296,16 +325,16 @@ def test_dry_run_starts_sends_and_saves_nothing(harness: Harness) -> None:
     assert not harness.state.path.exists()
 
 
-def test_stuck_session_reply_includes_its_screen(harness: Harness) -> None:
+def test_waiting_reply_shows_the_last_lines_of_the_screen(harness: Harness) -> None:
     harness.launcher.auto_start = False
     harness.launcher.screen = "\n".join(f"line {i}" for i in range(100)) + "\nPlease log in: /login"
     harness.mailbox.add("claude: x", "y")
     harness.cycle()
     assert harness.relay.running is not None
-    harness.relay.running.started -= 181
+    harness.relay.running.started -= 11
     harness.cycle()
     reply = harness.full_replies[-1]
-    assert reply.startswith("Didn't start")
+    assert reply.startswith("Waiting for input")
     assert reply.endswith("line 99\nPlease log in: /login")
     assert "line 40\n" not in reply  # only the last 60 lines
 
@@ -342,7 +371,7 @@ def test_claude_background_tasks_come_from_its_hook(harness: Harness) -> None:
     assert r.phase == "running"
     harness.launcher.agent_finishes("Tests passed", background_tasks=[])
     harness.cycle()
-    assert r.phase == "finished"
+    assert r.phase == "idle"  # finished; left open as nothing is queued
 
 
 def test_closing_the_window_mid_task_reports_the_last_message(harness: Harness) -> None:
@@ -365,6 +394,7 @@ def test_durations_read_naturally() -> None:
 
 def test_empty_session_folders_are_removed_when_closed(harness: Harness) -> None:
     harness.mailbox.add("claude: answer a question", "what is 2+2?")
+    harness.mailbox.add("codex: next", "x")
     harness.cycle()
     r = harness.relay.running
     assert r is not None
@@ -373,6 +403,54 @@ def test_empty_session_folders_are_removed_when_closed(harness: Harness) -> None
     assert harness.full_replies[-1].endswith("No files were created, so the session folder has been removed.")
     harness.cycle()
     assert not r.folder.exists()
+
+
+def test_a_finished_session_stays_open_for_follow_ups(harness: Harness) -> None:
+    uid = harness.mailbox.add("claude: question", "what is 2+2?")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    harness.launcher.agent_finishes("4")
+    harness.cycle()
+    assert r.phase == "idle" and r.proc.poll() is None
+    assert harness.full_replies[-1].endswith("Last message from claude:\n\n4\n\nNo files were created.")
+    harness.mailbox.add("agent: status", "")
+    harness.cycle()
+    assert "(finished; open for follow-ups)" in harness.full_replies[-1]
+
+    harness.launcher.screen = "> and 3+3?"
+    harness.mailbox.add("Re: claude: question", "type and 3+3?", extra_headers=f"References: <m{uid}@example.com>\r\n")
+    harness.cycle()
+    assert r.phase == "running"
+    harness.cycle()
+    assert r.phase == "running"  # the earlier finish isn't counted again
+    harness.launcher.agent_works()
+    harness.launcher.agent_finishes("6")
+    harness.cycle()
+    assert r.phase == "idle"
+    assert harness.full_replies[-1].startswith("Finished after 0 sec.\n\nLast message from claude:\n\n6")
+
+    harness.launcher.end_session()  # closed by hand once finished: nothing more to say
+    n = len(FakeSMTP.sent)
+    harness.cycle()
+    assert harness.relay.running is None and len(FakeSMTP.sent) == n
+
+
+def test_a_new_task_closes_a_finished_session(harness: Harness) -> None:
+    harness.mailbox.add("claude: first", "x")
+    harness.cycle()
+    r = harness.relay.running
+    assert r is not None
+    harness.launcher.agent_finishes("done")
+    harness.cycle()
+    assert r.phase == "idle"
+    harness.mailbox.add("codex: second", "y")
+    harness.cycle()
+    assert r.proc.poll() is not None and r.task.hash in harness.state.recent  # it ran: still a duplicate
+    harness.cycle()
+    new = harness.relay.running
+    assert new is not None and new.task.tool == "codex"
+    assert harness.full_replies[-1].startswith("Closed the finished claude session (first).\n\nStarted codex")
 
 
 def test_session_folders_with_files_are_kept(harness: Harness) -> None:
@@ -385,18 +463,6 @@ def test_session_folders_with_files_are_kept(harness: Harness) -> None:
     harness.cycle()
     harness.cycle()
     assert r.folder.exists()
-
-
-def test_folder_of_a_session_that_never_started_is_removed(harness: Harness) -> None:
-    harness.launcher.auto_start = False
-    harness.mailbox.add("claude: x", "y")
-    harness.cycle()
-    r = harness.relay.running
-    assert r is not None
-    r.started -= 181
-    harness.cycle()
-    harness.cycle()
-    assert not r.folder.exists()
 
 
 def test_agent_help_and_unknown_commands(harness: Harness) -> None:
@@ -505,30 +571,58 @@ def test_agent_type_and_keys(harness: Harness) -> None:
     assert harness.launcher.sent == [(True, "from the body"), (False, "Enter")]
 
 
-def test_typing_restarts_the_start_clock(harness: Harness) -> None:
-    harness.launcher.auto_start = False
-    harness.launcher.screen = "Log in?"
-    harness.mailbox.add("claude: job", "x")
-    harness.cycle()
-    r = harness.relay.running
-    assert r is not None
-    r.started -= 170
-    harness.mailbox.add("agent: keys enter", "")
-    harness.cycle()
-    r.started -= 20  # 190 sec since it opened, but a key was just pressed
-    harness.cycle()
-    assert r.phase == "starting"
-    r.typed_at -= 181
-    harness.cycle()
-    assert r.phase == "abandoned"
-
-
 def test_typing_without_tmux(harness: Harness) -> None:
     harness.mailbox.add("claude: job", "x")
     harness.cycle()
     harness.mailbox.add("agent: type hello", "")
     harness.cycle()
     assert harness.full_replies[-1] == "Couldn't type into the session (is tmux installed?)."
+
+
+def test_a_reply_is_read_as_a_command(harness: Harness) -> None:
+    harness.launcher.auto_start = False
+    harness.launcher.screen = "Update? 1. Yes 2. No"
+    uid = harness.mailbox.add("claude: job", "x")
+    harness.cycle()
+    in_thread = f"In-Reply-To: <r1@agent-relay.local>\r\nReferences: <m{uid}@example.com> <r1@agent-relay.local>\r\n"
+    harness.mailbox.add(
+        "Re: claude: job", "\n type 2 \n\nOn Wed, AgentRelay wrote:\n> Waiting for input", extra_headers=in_thread
+    )
+    harness.cycle()
+    assert harness.launcher.sent == [(True, "2"), (False, "Enter")]
+    assert harness.full_replies[-1].startswith("Typed '2' and pressed Enter.")
+    assert harness.relay.running is not None  # a reply never becomes a new task
+
+    harness.mailbox.add("RE: Re: claude: job", "Agent : screen")
+    harness.mailbox.add("Re: agent: status", "dance")
+    harness.mailbox.add("re:codex: other", "")
+    harness.mailbox.add("Re: lunch?", "stop")  # not an AgentRelay thread
+    harness.cycle()
+    assert harness.full_replies[-3] == "claude: job\n\nUpdate? 1. Yes 2. No"
+    assert harness.full_replies[-2].startswith("Unknown command 'dance'.")
+    assert harness.full_replies[-1].startswith("No command given.")
+    assert harness.relay.running is not None and harness.relay.running.phase == "starting"
+
+
+def test_a_reply_from_an_ended_sessions_thread_does_not_touch_the_running_one(harness: Harness) -> None:
+    old = harness.mailbox.add("claude: yesterday", "x")
+    harness.cycle()
+    harness.launcher.end_session()
+    harness.cycle()
+    harness.mailbox.add("codex: today", "y")
+    harness.cycle()
+    harness.launcher.screen = "working"
+    stale = f"References: <m{old}@example.com>\r\n"
+    for command in ("stop", "type 1", "keys enter"):
+        harness.mailbox.add("Re: claude: yesterday", command, extra_headers=stale)
+    harness.mailbox.add("Re: claude: yesterday", "screen", extra_headers=stale)  # not session-bound
+    harness.mailbox.add("Re: agent: status", "type 1")  # an agent: thread acts on what is running
+    harness.cycle()
+    ended = "That session has ended, so nothing was done."
+    assert [r.startswith(ended) for r in harness.full_replies[-5:]] == [True, True, True, False, False]
+    assert harness.full_replies[-2] == "codex: today\n\nworking"
+    assert harness.launcher.sent == [(True, "1"), (False, "Enter")]  # only from the agent: thread
+    assert harness.relay.running is not None and harness.relay.running.phase == "running"
 
 
 def test_commands_count_towards_the_flood_breaker(harness: Harness) -> None:

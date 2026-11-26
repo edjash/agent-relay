@@ -31,15 +31,18 @@ It uses only the Python standard library.
 | the same task again within an hour | ignored | no |
 | accepted while a session is running | queued | queue position |
 | accepted and started | session opens; "started" once the agent takes the prompt | "started", with the folder |
-| stuck at start (no prompt taken in 3 minutes: login, update, other dialog) | window closed, next task starts | "didn't start", with its screen |
+| stuck at start (no prompt taken in 10 seconds: login, update, other dialog) | left open for `agent: type` / `keys`; a new task or `agent: stop` closes it | "waiting for input", with its screen (instead of "started") |
 | failed to start | dropped | the reason |
-| finished (agent's turn over; for Claude, no background tasks left) | window closed, next task starts | "finished", with the agent's last message and the files |
+| finished (agent's turn over; for Claude, no background tasks left) | if a task is queued: window closed, next task starts; otherwise left open for follow-ups until a new task arrives | "finished", with the agent's last message and the files |
 | closed by you | next task starts | "session closed", with the same |
 
-Sessions are meant to run unattended, so AgentRelay closes them itself. Each agent gets hooks that report
-when it takes the prompt, uses a tool and finishes its turn. Claude also reports background tasks it left
-running (a build, a test run): the session stays open until they end and Claude finishes again. Codex reports
-none, so a Codex session closes when its turn ends. A closed session whose agent created no files has its
+Only one session is open at a time, and **a new task closes the open session** unless its agent is working
+(then the task queues). Each agent gets hooks that report when it takes the prompt, uses a tool and finishes
+its turn. Claude also reports background tasks it left running (a build, a test run): it doesn't count as
+finished until they end and Claude finishes again. Codex reports none, so for Codex the end of its turn counts.
+A finished session is closed straight away if a task is waiting; otherwise it stays open, so a reply of
+`type <follow-up>` in its thread carries on the conversation (and brings another "finished" email). A closed
+session whose agent created no files has its
 folder removed, so empty folders don't pile up; the conversation is kept by the agent and can still be resumed.
 To carry on with a closed session, run `claude --continue` or `codex resume` in its folder.
 
@@ -64,9 +67,16 @@ body). They are answered straight away, never queued, and count towards the floo
 | `agent: keys <keys>` | presses keys, e.g. `agent: keys down down enter`, then replies with the screen (needs tmux). Keys: `enter`, `esc`, `tab`, `shift-tab`, `space`, `backspace`, arrows, `ctrl-<letter>`, or any single character |
 | `agent: help` | the list of commands |
 
-`type` and `keys` answer whatever a session is stuck on (an update question, a login code, a menu): send
-`agent: screen` to see it, then reply to it. Typing into a session that hasn't taken its prompt yet restarts its
-3-minute clock. Don't type passwords this way; they would stay in your sent mail.
+You can also **reply** to any AgentRelay email (or task email) with just the command on the first line,
+such as `stop`, `screen` or `type 1`; a leading `agent:` is fine too. It works exactly like the `agent:` subject,
+and the quoted text below is ignored. A reply is never treated as a new task. `stop`, `type` and `keys` sent in
+a task's thread only act on that task's session: in the thread of a session that has ended they do nothing and
+say so. (Replies in an `agent:` thread act on whatever is running.)
+
+`type` and `keys` answer whatever a session is stuck on (an update question, a login code, a menu): the
+"waiting for input" reply shows it, and `agent: screen` shows it again. A stuck session is never closed by
+itself; a new `claude:` or `codex:` task closes it and starts instead. Don't type passwords this way; they would
+stay in your sent mail.
 
 ## Security model
 
@@ -165,7 +175,6 @@ typo can't silently fall back to a default. To keep `.env` somewhere else, set `
 | `AGENT_RELAY_FLOOD_COUNT` / `_FLOOD_WINDOW_MINUTES` | 10 / 10 | flood breaker threshold |
 | `AGENT_RELAY_REPLY_BUDGET` | 30 | replies per rolling 24 hours |
 | `AGENT_RELAY_DUPLICATE_WINDOW_MINUTES` | 60 | identical task ignored within this window |
-| `AGENT_RELAY_START_TIMEOUT_MINUTES` | 3 | close a session that hasn't taken its prompt by then |
 | `AGENT_RELAY_LOG_LEVEL` / `_LOG_FILE` | `INFO` / none | |
 
 State (handled emails, queue, reply count) lives in `~/.local/state/agent-relay/state.json`.
