@@ -46,7 +46,8 @@ session whose agent created no files has its
 folder removed, so empty folders don't pile up; the conversation is kept by the agent and can still be resumed.
 To carry on with a closed session, run `claude --continue` or `codex resume` in its folder.
 
-**Triggering**: the subject must start with `claude:` or `codex:` (any case). The rest of the subject and the
+**Triggering**: the subject must start with one of your agent names from `config.json` and a colon, such
+as `claude:` or `codex:` (any case; see [Agents](#agents-configjson)). The rest of the subject and the
 plain-text body become the prompt. Attachments are never downloaded.
 
 **Replies** go back in the same thread, shown as from "AgentRelay", as HTML (screens and the agent's last
@@ -104,7 +105,7 @@ A task email makes an agent run on your machine, so AgentRelay only accepts mail
 
 A forged `From` header is ignored silently: replying would confirm the relay exists and could mail a faked
 address. Sessions run unattended, so nobody is there to answer permission prompts: `.env.example` passes
-the agents' skip-permission flags (`AGENT_RELAY_CLAUDE_ARGS`, `AGENT_RELAY_CODEX_ARGS`), and a session can
+the agents' skip-permission flags (in `config.example.json`), and a session can
 do anything your user account can. The sender check above is what keeps that safe.
 
 ## Install
@@ -126,7 +127,7 @@ ln -s "$PWD/.venv/bin/agent-relay" ~/.local/bin/agent-relay
    <https://myaccount.google.com/apppasswords>.
 2. Create and fill in the settings:
    ```bash
-   agent-relay init        # copies .env.example to .env in the project folder (mode 600, git-ignored)
+   agent-relay init        # creates .env and config.json in the project folder (mode 600, git-ignored)
    ```
    Set `AGENT_RELAY_GMAIL_USER`, `AGENT_RELAY_APP_PASSWORD` and `AGENT_RELAY_ALLOWED_SENDERS`.
 3. Send yourself a `claude: test` email and see what would happen, without starting or sending anything:
@@ -184,8 +185,6 @@ typo can't silently fall back to a default. To keep `.env` somewhere else, set `
 | `AGENT_RELAY_APP_PASSWORD` | | Google app password |
 | `AGENT_RELAY_ALLOWED_SENDERS` | | comma-separated addresses allowed to send tasks |
 | `AGENT_RELAY_SESSIONS_DIR` | `~/agent-relay/sessions` | where session folders are created |
-| `AGENT_RELAY_CLAUDE_ARGS` | none (`.env.example`: `--dangerously-skip-permissions`) | extra flags for Claude, shell-style |
-| `AGENT_RELAY_CODEX_ARGS` | none (`.env.example`: `--dangerously-bypass-approvals-and-sandbox`) | extra flags for Codex, shell-style |
 | `AGENT_RELAY_MAX_AGE_HOURS` | 24 | ignore older task emails |
 | `AGENT_RELAY_QUEUE_MAX` | 5 | tasks allowed to wait |
 | `AGENT_RELAY_FLOOD_COUNT` / `_FLOOD_WINDOW_MINUTES` | 10 / 10 | flood breaker threshold |
@@ -194,6 +193,28 @@ typo can't silently fall back to a default. To keep `.env` somewhere else, set `
 | `AGENT_RELAY_LOG_LEVEL` / `_LOG_FILE` | `INFO` / none | |
 
 State (handled emails, queue, reply count) lives in `~/.local/state/agent-relay/state.json`.
+
+### Agents (`config.json`)
+
+`config.json` (next to `.env`, git-ignored; `agent-relay init` creates it from `config.example.json`) names
+the agents you can email. Each name is a subject word, and says which CLI it runs with which flags:
+
+```json
+{
+  "claude": {"cli": "claude", "flags": {"dangerously-skip-permissions": true}},
+  "codex":  {"cli": "codex",  "flags": {"dangerously-bypass-approvals-and-sandbox": true}},
+  "opus":   {"cli": "claude", "flags": {"dangerously-skip-permissions": true, "model": "opus", "effort": "max"}},
+  "deep":   {"cli": "codex",  "flags": {"dangerously-bypass-approvals-and-sandbox": true,
+                                         "config": "model_reasoning_effort=high"}}
+}
+```
+
+With that file, `opus: research X` starts Claude with `--model opus --effort max`. Flags are passed through
+as written, whatever the CLI supports: `"model": "opus"` becomes `--model opus`, `true` a bare flag (`false`
+or `null` leaves it out), a list repeats the flag, and a one-letter name is a short flag (`"c": "x=1"` becomes
+`-c x=1`). Names are lower-case words, and `agent` is reserved for commands. Sessions run unattended, so give
+each profile its CLI's skip-permission flag, or it will wait at the first permission prompt. AgentRelay always
+adds its own hooks (and, for Codex, turns off the update check). Restart AgentRelay after editing the file.
 
 ## How it talks to Gmail
 

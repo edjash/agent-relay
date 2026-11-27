@@ -24,8 +24,6 @@ NETWORK_TIMEOUT = 60
 MAX_BODY_BYTES = 1_000_000
 # Header on our own replies; mail carrying it is never treated as a task.
 REPLY_HEADER = "X-Agent-Relay"
-# Server-side pre-filter so ordinary mail is never downloaded.
-SUBJECT_TERMS = 'OR SUBJECT "claude" OR SUBJECT "codex" SUBJECT "agent"'
 # IMAP dates need English month names whatever the system locale is.
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
@@ -44,12 +42,21 @@ def imap_date(d: date) -> str:
     return f"{d.day:02d}-{_MONTHS[d.month - 1]}-{d.year}"
 
 
-def sender_terms(senders: Collection[str]) -> str:
-    """IMAP search terms matching any of the senders."""
-    terms = [f'FROM "{a}"' for a in sorted(senders)]
+def _any_of(terms: list[str]) -> str:
     while len(terms) > 1:
         terms = [f"OR {terms[0]} {terms[1]}", *terms[2:]]
     return terms[0]
+
+
+def sender_terms(senders: Collection[str]) -> str:
+    """IMAP search terms matching any of the senders."""
+    return _any_of([f'FROM "{a}"' for a in sorted(senders)])
+
+
+def subject_terms(words: Collection[str]) -> str:
+    """IMAP search terms for a subject containing any of the words (a
+    server-side pre-filter, so ordinary mail is never downloaded)."""
+    return _any_of([f'SUBJECT "{w}"' for w in sorted(words)])
 
 
 class Gmail:
@@ -63,11 +70,12 @@ class Gmail:
             imap.login(user, password)
             yield Gmail(imap)
 
-    def search_tasks(self, senders: Collection[str], since: date) -> list[str]:
-        """UIDs of inbox mail from the senders, with claude/codex/agent in the subject,
-        received on or after `since` (a date in Gmail's timezone)."""
+    def search_tasks(self, senders: Collection[str], since: date, words: Collection[str]) -> list[str]:
+        """UIDs of inbox mail from the senders, with one of the words (profile
+        names, "agent") in the subject, received on or after `since` (a date in
+        Gmail's timezone)."""
         self.imap.select("INBOX", readonly=True)
-        typ, data = self.imap.uid("SEARCH", "SINCE", imap_date(since), sender_terms(senders), SUBJECT_TERMS)
+        typ, data = self.imap.uid("SEARCH", "SINCE", imap_date(since), sender_terms(senders), subject_terms(words))
         if typ != "OK":
             raise imaplib.IMAP4.error(f"search failed: {data}")
         return [u.decode() for u in data[0].split()]

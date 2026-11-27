@@ -14,7 +14,7 @@ from agent_relay import __version__, config
 from agent_relay.config import Config, ConfigError
 from agent_relay.relay import EXIT_ERROR, EXIT_NO_RESTART, EXIT_OK, Relay, run
 from agent_relay.replies import Replier
-from agent_relay.sessions import TOOLS, Launcher, start_interactive
+from agent_relay.sessions import Launcher, start_interactive
 from agent_relay.state import AlreadyRunning, State, acquire_lock, lock_holder
 
 log = logging.getLogger("agent_relay")
@@ -59,8 +59,14 @@ def setup_logging(cfg: Config, verbose: bool = False) -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+    if config.ENV_PATH.exists() and not config.PROFILES_PATH.exists():  # set up before config.json existed
+        config.write_template(config.PROFILES_PATH, config.PROFILES_TEMPLATE)
+        print(f"Created {config.PROFILES_PATH}: the agents ('claude:', 'codex:') and their flags.")
+        return EXIT_OK
     path = config.write_template(config.ENV_PATH)
-    print(f"Created {path} (readable only by you).\n")
+    if not config.PROFILES_PATH.exists():
+        config.write_template(config.PROFILES_PATH, config.PROFILES_TEMPLATE)
+    print(f"Created {path} (readable only by you), and {config.PROFILES_PATH} (the agents and their flags).\n")
     print("Next:")
     print("  1. Turn on 2-Step Verification for the Google account, then create an app password at")
     print("     https://myaccount.google.com/apppasswords")
@@ -83,9 +89,10 @@ def _listen(args: argparse.Namespace, *, once: bool) -> int:
         replier = Replier(cfg.gmail_user, cfg.app_password, state, dry_run=args.dry_run)
         relay = Relay(cfg, state, replier, Launcher(cfg.sessions_dir), dry_run=args.dry_run)
         log.info(
-            "AgentRelay %s watching %s for 'claude:' / 'codex:' mail from %s%s",
+            "AgentRelay %s watching %s for %s mail from %s%s",
             __version__,
             cfg.gmail_user,
+            " / ".join(f"'{n}:'" for n in cfg.profiles),
             ", ".join(sorted(cfg.allowed_senders)),
             " (dry run)" if args.dry_run else "",
         )
@@ -130,12 +137,19 @@ def cmd_status(args: argparse.Namespace) -> int:
         last = max(state.processed.values())[:16].replace("T", " ")
         print(f"Handled:   {len(state.processed)} task email(s) in the last 7 days, latest {last}")
     print(f"Settings:  {config.ENV_PATH}{'' if config.ENV_PATH.exists() else ' (missing: run agent-relay init)'}")
+    missing = "" if config.PROFILES_PATH.exists() else " (missing: run agent-relay init)"
+    print(f"Agents:    {', '.join(cfg.profiles) or '-'} ({config.PROFILES_PATH}{missing})")
     return EXIT_OK
 
 
 def cmd_new(args: argparse.Namespace) -> int:
     cfg = config.load(require_gmail=False)
-    return start_interactive(cfg.sessions_dir, args.tool, cfg.tool_args.get(args.tool, ()))
+    profile = cfg.profiles.get(args.agent)
+    if profile is None:
+        names = ", ".join(cfg.profiles) or f"none: run agent-relay init to create {config.PROFILES_PATH}"
+        print(f"No '{args.agent}' profile in {config.PROFILES_PATH} (there are: {names}).", file=sys.stderr)
+        return EXIT_ERROR
+    return start_interactive(cfg.sessions_dir, profile.cli, profile.args, name=profile.name)
 
 
 def cmd_install_service(args: argparse.Namespace) -> int:
@@ -166,7 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    sub.add_parser("init", help="create .env from .env.example").set_defaults(func=cmd_init)
+    sub.add_parser("init", help="create .env and config.json from their examples").set_defaults(func=cmd_init)
 
     for name, func, help_text in (
         ("run", cmd_run, "listen for task emails until stopped"),
@@ -180,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="show the listener, session, queue and reply budget").set_defaults(func=cmd_status)
 
     p = sub.add_parser("new", help="start a session by hand in a new session folder")
-    p.add_argument("tool", nargs="?", choices=TOOLS, default="claude", help="which agent (default: claude)")
+    p.add_argument("agent", nargs="?", default="claude", help="a profile from config.json (default: claude)")
     p.set_defaults(func=cmd_new)
 
     p = sub.add_parser("install-service", help="install a systemd user service that runs the listener")

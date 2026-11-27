@@ -15,13 +15,24 @@ AGENT_RELAY_ALLOWED_SENDERS=Owner@Example.com, other@example.com
 AGENT_RELAY_SESSIONS_DIR=/tmp/sessions-test
 AGENT_RELAY_QUEUE_MAX=3   # fewer
 AGENT_RELAY_FLOOD_WINDOW_MINUTES=5
-AGENT_RELAY_CODEX_ARGS=--yolo -c 'model="o3 mini"'
 """
+PROFILES = """{
+  "claude": {"cli": "claude", "flags": {"dangerously-skip-permissions": true}},
+  "deep": {"cli": "codex", "flags": {"model": "o3 mini", "c": ["a=1", 2], "yolo": true, "off": false, "--x": null}}
+}"""
+
+
+def write_filled(paths: Path, profiles: str = PROFILES) -> Path:
+    (paths / "config.json").write_text(profiles)
+    path = paths / ".env"
+    path.write_text(FILLED)
+    return path
 
 
 @pytest.fixture
 def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(config, "ENV_PATH", tmp_path / ".env")
+    monkeypatch.setattr(config, "PROFILES_PATH", tmp_path / "config.json")
     monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(config, "LOCK_PATH", tmp_path / "listener.lock")
     for key in KNOWN_KEYS:
@@ -29,8 +40,9 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def test_env_example_matches_the_template() -> None:
+def test_examples_match_the_templates() -> None:
     assert (PROJECT_DIR / ".env.example").read_text() == TEMPLATE
+    assert (PROJECT_DIR / "config.example.json").read_text() == config.PROFILES_TEMPLATE
 
 
 def test_parse_env() -> None:
@@ -60,6 +72,7 @@ def test_parse_env_errors_name_the_line(line: str) -> None:
 
 
 def test_template_is_private_and_must_be_filled_in(paths: Path) -> None:
+    write_template(paths / "config.json", config.PROFILES_TEMPLATE)
     path = write_template(paths / ".env")
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(ConfigError, match=r"GMAIL_USER.*APP_PASSWORD.*ALLOWED_SENDERS"):
@@ -69,39 +82,40 @@ def test_template_is_private_and_must_be_filled_in(paths: Path) -> None:
 
 
 def test_template_defaults_load(paths: Path) -> None:
+    write_template(paths / "config.json", config.PROFILES_TEMPLATE)
     cfg = load(write_template(paths / ".env"), require_gmail=False)
     assert cfg.sessions_dir == Path.home() / "agent-relay/sessions"
-    assert cfg.tool_args["claude"] == ("--dangerously-skip-permissions",)
-    assert cfg.tool_args["codex"] == ("--dangerously-bypass-approvals-and-sandbox",)
+    assert cfg.profiles == {
+        "claude": config.Profile("claude", "claude", ("--dangerously-skip-permissions",)),
+        "codex": config.Profile("codex", "codex", ("--dangerously-bypass-approvals-and-sandbox",)),
+    }
     assert cfg.limits == config.Limits()
     assert cfg.log_file is None
     assert cfg.log_level == "INFO"
 
 
 def test_filled_env_loads(paths: Path) -> None:
-    path = paths / ".env"
-    path.write_text(FILLED)
-    cfg = load(path)
+    cfg = load(write_filled(paths))
     assert cfg.gmail_user == "owner@example.com"
     assert cfg.allowed_senders == {"owner@example.com", "other@example.com"}
     assert cfg.sessions_dir == Path("/tmp/sessions-test")
     assert cfg.limits.queue_max == 3
     assert cfg.limits.flood_window == timedelta(minutes=5)
     assert cfg.limits.reply_budget == 100  # default
-    assert cfg.tool_args == {"claude": (), "codex": ("--yolo", "-c", 'model="o3 mini"')}
+    assert cfg.profiles["deep"] == config.Profile(
+        "deep", "codex", ("--model", "o3 mini", "-c", "a=1", "-c", "2", "--yolo")
+    )
     assert "abcd" not in repr(cfg)  # the password never shows up in logs
 
 
 def test_environment_variables_override_the_file(paths: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = paths / ".env"
-    path.write_text(FILLED)
+    path = write_filled(paths)
     monkeypatch.setenv("AGENT_RELAY_APP_PASSWORD", "from-env")
     assert load(path).app_password == "from-env"
 
 
 def test_loose_permissions_are_tightened(paths: Path) -> None:
-    path = paths / ".env"
-    path.write_text(FILLED)
+    path = write_filled(paths)
     path.chmod(0o644)
     load(path)
     assert path.stat().st_mode & 0o777 == 0o600
@@ -114,18 +128,54 @@ def test_loose_permissions_are_tightened(paths: Path) -> None:
         (FILLED.replace("QUEUE_MAX=3", "QUEUE_MAX=lots"), "AGENT_RELAY_QUEUE_MAX"),
         (FILLED + "AGENT_RELAY_QUEUE_MAXX=4\n", "unknown setting.*QUEUE_MAXX"),
         (FILLED.replace("=/tmp/sessions-test", "=sessions"), "SESSIONS_DIR must be an absolute path"),
+        (FILLED + "AGENT_RELAY_CLAUDE_ARGS=--x\n", "CLAUDE_ARGS moved to config.json"),
     ],
 )
 def test_bad_settings_are_explained(paths: Path, text: str, message: str) -> None:
-    path = paths / ".env"
+    path = write_filled(paths)
     path.write_text(text)
     with pytest.raises(ConfigError, match=message):
         load(path)
 
 
+@pytest.mark.parametrize(
+    ("profiles", "message"),
+    [
+        ("", "Expecting value"),
+        ("[]", "expected an object of profiles"),
+        ('{"agent": {"cli": "claude"}}', "not 'agent'"),
+        ('{"Opus": {"cli": "claude"}}', "lower-case words"),
+        ('{"opus": {"cli": "gemini"}}', 'needs "cli"'),
+        ('{"opus": {"cli": "claude", "args": []}}', "unknown key"),
+        ('{"opus": {"cli": "claude", "flags": ["--model"]}}', "must be an object"),
+        ('{"opus": {"cli": "claude", "flags": {"model opus": "x"}}}', "isn't a flag name"),
+        ('{"opus": {"cli": "claude", "flags": {"model": {"a": 1}}}}', "must be text"),
+    ],
+)
+def test_bad_profiles_are_explained(paths: Path, profiles: str, message: str) -> None:
+    path = write_filled(paths, profiles)
+    with pytest.raises(ConfigError, match=message):
+        load(path)
+
+
+def test_missing_profiles_file(paths: Path) -> None:
+    path = write_filled(paths)
+    (paths / "config.json").unlink()
+    with pytest.raises(ConfigError, match=r"No agent profiles.*agent-relay init"):
+        load(path)
+
+
+def test_cli_init_adds_config_json_to_an_existing_setup(paths: Path) -> None:
+    write_filled(paths)
+    (paths / "config.json").unlink()
+    assert cli.main(["init"]) == 0
+    assert (paths / "config.json").read_text() == config.PROFILES_TEMPLATE
+    assert (paths / ".env").read_text() == FILLED  # untouched
+
+
 def test_cli_init_then_run_refuses_unfinished_settings(paths: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["init"]) == 0
-    assert (paths / ".env").exists()
+    assert (paths / ".env").exists() and (paths / "config.json").exists()
     assert cli.main(["run"]) == 2
     assert "Fill in AGENT_RELAY_GMAIL_USER" in capsys.readouterr().err
 

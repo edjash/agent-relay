@@ -1,11 +1,11 @@
-"""Configuration: a .env file in the project folder, overridable by real
-environment variables."""
+"""Configuration: a .env file in the project folder (overridable by real
+environment variables), and config.json beside it holding the agent profiles."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
-import shlex
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -22,6 +22,7 @@ def _xdg(var: str, default: str) -> Path:
 # points elsewhere if the package is installed outside its repository.
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 ENV_PATH = Path(os.environ.get("AGENT_RELAY_ENV_FILE") or PROJECT_DIR / ".env").expanduser()
+PROFILES_PATH = ENV_PATH.parent / "config.json"
 STATE_DIR = _xdg("XDG_STATE_HOME", "~/.local/state") / APP
 STATE_PATH = STATE_DIR / "state.json"
 LOCK_PATH = STATE_DIR / "listener.lock"
@@ -48,10 +49,7 @@ AGENT_RELAY_ALLOWED_SENDERS={PLACEHOLDER_USER}
 # Each session gets a new folder in here. Blank: ~/agent-relay/sessions
 AGENT_RELAY_SESSIONS_DIR=
 
-# Extra command-line flags for each agent, written as in a shell. Sessions run
-# unattended, so these skip the permission prompts. Blank: no flags.
-AGENT_RELAY_CLAUDE_ARGS=--dangerously-skip-permissions
-AGENT_RELAY_CODEX_ARGS=--dangerously-bypass-approvals-and-sandbox
+# The agents (subject words such as 'claude:') and their flags are in config.json.
 
 # Limits (optional; these are the defaults).
 AGENT_RELAY_MAX_AGE_HOURS=24             # ignore task emails received longer ago than this
@@ -69,7 +67,7 @@ AGENT_RELAY_LOG_FILE=       # empty means terminal / systemd journal only
 KNOWN_KEYS = frozenset(
     PREFIX + k
     for k in (
-        "GMAIL_USER", "APP_PASSWORD", "ALLOWED_SENDERS", "SESSIONS_DIR", "CLAUDE_ARGS", "CODEX_ARGS",
+        "GMAIL_USER", "APP_PASSWORD", "ALLOWED_SENDERS", "SESSIONS_DIR",
         "MAX_AGE_HOURS", "QUEUE_MAX", "FLOOD_COUNT", "FLOOD_WINDOW_MINUTES",
         "REPLY_BUDGET", "DUPLICATE_WINDOW_MINUTES", "LOG_LEVEL", "LOG_FILE",
         "ENV_FILE",
@@ -77,8 +75,36 @@ KNOWN_KEYS = frozenset(
 )  # fmt: skip
 
 
+# Kept identical to config.example.json (a test checks).
+PROFILES_TEMPLATE = """\
+{
+  "claude": {
+    "cli": "claude",
+    "flags": {"dangerously-skip-permissions": true}
+  },
+  "codex": {
+    "cli": "codex",
+    "flags": {"dangerously-bypass-approvals-and-sandbox": true}
+  }
+}
+"""
+CLIS = ("claude", "codex")
+RESERVED_NAMES = ("agent",)  # "agent:" is for commands
+_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
+_FLAG = re.compile(r"^-{0,2}([A-Za-z0-9][A-Za-z0-9_.-]*)$")
+
+
 class ConfigError(Exception):
-    """The .env file is missing, unreadable or incomplete."""
+    """The .env file or config.json is missing, unreadable or incomplete."""
+
+
+@dataclass(frozen=True)
+class Profile:
+    """A subject word ("claude", "opus"...): which agent it starts, with which flags."""
+
+    name: str
+    cli: str
+    args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,8 +125,8 @@ class Config:
     app_password: str = field(default="", repr=False)
     allowed_senders: frozenset[str] = frozenset()
     sessions_dir: Path = DEFAULT_SESSIONS_DIR
-    # Extra flags per agent ("claude", "codex"), straight from .env.
-    tool_args: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # From config.json: subject word -> profile.
+    profiles: dict[str, Profile] = field(default_factory=dict)
     limits: Limits = Limits()
     log_level: str = "INFO"
     log_file: Path | None = None
@@ -132,16 +158,65 @@ def parse_env(text: str, source: str = ".env") -> dict[str, str]:
     return values
 
 
-def write_template(path: Path | None = None) -> Path:
-    """Create the .env file from the template, readable only by the owner."""
+def write_template(path: Path | None = None, text: str = TEMPLATE) -> Path:
+    """Create the .env file (or config.json) from its template, readable only by the owner."""
     path = path or ENV_PATH
     if path.exists():
         raise ConfigError(f"{path} already exists; not overwriting it.")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(TEMPLATE)
+        f.write(text)
     return path
+
+
+def flags_to_args(flags: object, where: str) -> tuple[str, ...]:
+    """{"model": "opus", "yolo": true, "config": ["a=1", "b=2"]} ->
+    --model opus --yolo --config a=1 --config b=2. A one-letter key is a short
+    flag (-c); false or null leaves the flag out."""
+    if not isinstance(flags, dict):
+        raise ConfigError(f'{where}: \'flags\' must be an object like {{"model": "opus"}}')
+    args: list[str] = []
+    for key, value in flags.items():
+        m = _FLAG.match(key)
+        if not m:
+            raise ConfigError(f"{where}: {key!r} isn't a flag name")
+        flag = ("-" if len(m.group(1)) == 1 else "--") + m.group(1)
+        values = value if isinstance(value, list) else [value]
+        for v in values:
+            if v is True:
+                args.append(flag)
+            elif v is False or v is None:
+                continue
+            elif isinstance(v, (str, int, float)):
+                args += [flag, str(v)]
+            else:
+                raise ConfigError(f"{where}: {key!r} must be text, a number, true/false or a list of them")
+    return tuple(args)
+
+
+def load_profiles(path: Path | None = None) -> dict[str, Profile]:
+    path = path or PROFILES_PATH
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise ConfigError(f"No agent profiles at {path}. Run `agent-relay init` to create it.") from None
+    except (OSError, ValueError) as e:
+        raise ConfigError(f"{path}: {e}") from None
+    if not isinstance(data, dict) or not data:
+        raise ConfigError(f'{path}: expected an object of profiles, like {{"claude": {{"cli": "claude"}}}}')
+    profiles: dict[str, Profile] = {}
+    for name, spec in data.items():
+        where = f"{path}: profile {name!r}"
+        if not _NAME.match(name) or name in RESERVED_NAMES:
+            raise ConfigError(f"{where}: names are lower-case words (letters, digits, - or _), and not 'agent'")
+        if not isinstance(spec, dict) or spec.get("cli") not in CLIS:
+            raise ConfigError(f'{where}: needs "cli": "claude" or "codex"')
+        unknown = sorted(set(spec) - {"cli", "flags"})
+        if unknown:
+            raise ConfigError(f"{where}: unknown key(s) {', '.join(unknown)} (only cli and flags)")
+        profiles[name] = Profile(name, spec["cli"], flags_to_args(spec.get("flags", {}), where))
+    return profiles
 
 
 def _positive_int(values: dict[str, str], key: str, default: int) -> int:
@@ -164,25 +239,24 @@ def _sessions_dir(value: str) -> Path:
     return path
 
 
-def _args(values: dict[str, str], tool: str) -> tuple[str, ...]:
-    key = f"{PREFIX}{tool.upper()}_ARGS"
-    try:
-        return tuple(shlex.split(values.get(key, "")))
-    except ValueError as e:
-        raise ConfigError(f"{key}: {e}") from None
-
-
-def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
-    """Load settings from the .env file, then real environment variables.
-    With require_gmail=False a missing or unfinished file is fine (for commands
-    that don't touch Gmail)."""
+def load(path: Path | None = None, *, require_gmail: bool = True, profiles_path: Path | None = None) -> Config:
+    """Load settings from the .env file, then real environment variables, and
+    the profiles from config.json. With require_gmail=False missing or
+    unfinished files are fine (for commands that don't touch Gmail)."""
     path = path or ENV_PATH
+    profiles_path = profiles_path or path.parent / PROFILES_PATH.name
     values: dict[str, str] = {}
     if path.exists():
         if path.stat().st_mode & 0o077:
             path.chmod(0o600)
         values = parse_env(path.read_text(), str(path))
         unknown = sorted(k for k in values if k.startswith(PREFIX) and k not in KNOWN_KEYS)
+        moved = [k for k in unknown if k in (PREFIX + "CLAUDE_ARGS", PREFIX + "CODEX_ARGS")]
+        if moved:
+            raise ConfigError(
+                f"{path}: {', '.join(moved)} moved to {profiles_path.name}: put the flags in each profile's "
+                '"flags" and delete the line(s) here.'
+            )
         if unknown:
             raise ConfigError(f"{path}: unknown setting(s) {', '.join(unknown)} (typo?)")
     elif require_gmail and not os.environ.get(PREFIX + "GMAIL_USER"):
@@ -196,7 +270,7 @@ def load(path: Path | None = None, *, require_gmail: bool = True) -> Config:
         app_password=values.get(PREFIX + "APP_PASSWORD", ""),
         allowed_senders=frozenset(s.lower() for s in senders if s),
         sessions_dir=_sessions_dir(values.get(PREFIX + "SESSIONS_DIR", "")),
-        tool_args={tool: _args(values, tool) for tool in ("claude", "codex")},
+        profiles=load_profiles(profiles_path) if require_gmail or profiles_path.exists() else {},
         limits=Limits(
             max_age=timedelta(hours=_positive_int(values, "MAX_AGE_HOURS", 24)),
             queue_max=_positive_int(values, "QUEUE_MAX", 5),

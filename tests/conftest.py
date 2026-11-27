@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from agent_relay.config import Config
+from agent_relay.config import Config, Profile
 from agent_relay.gmail import Gmail
 from agent_relay.relay import Relay
 from agent_relay.replies import Replier
@@ -226,7 +226,11 @@ class Harness:
 @pytest.fixture
 def cfg(tmp_path: Path) -> Config:
     return Config(
-        gmail_user=OWNER, app_password="pw", allowed_senders=frozenset({OWNER}), sessions_dir=tmp_path / "sessions"
+        gmail_user=OWNER,
+        app_password="pw",
+        allowed_senders=frozenset({OWNER}),
+        sessions_dir=tmp_path / "sessions",
+        profiles={name: Profile(name, name) for name in ("claude", "codex")},
     )
 
 

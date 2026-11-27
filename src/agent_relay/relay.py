@@ -42,7 +42,6 @@ from agent_relay.watch import FolderWatch
 
 log = logging.getLogger(__name__)
 
-SUBJECT_RE = re.compile(r"^\s*(claude|codex|agent)\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
 # A reply in one of those threads ("Re: claude: ..."): its first line is an agent: command.
 REPLY_RE = re.compile(r"^(\s*re\s*:)+", re.IGNORECASE)
 AGENT_PREFIX_RE = re.compile(r"^\s*agent\s*:\s*", re.IGNORECASE)
@@ -64,10 +63,7 @@ is optional):
                         backspace, up, down, left, right, ctrl-<letter>, or
                         any single character
   agent: reset          reset the reply count after the daily limit is reached
-  agent: help           this list
-
-Tasks: 'claude: <task>' or 'codex: <task>', with more detail in the body if needed.
-A new task closes the open session unless it is working (then it queues)."""
+  agent: help           this list"""
 # Key names for "agent: keys", as tmux names them.
 KEY_NAMES = {
     "enter": "Enter", "return": "Enter", "esc": "Escape", "escape": "Escape", "tab": "Tab",
@@ -200,6 +196,9 @@ class Relay:
         self.arrivals: list[datetime] = []  # received times of trusted task mail (flood breaker)
         self.paused = False  # flood breaker tripped; cleared only by a restart
         self.running: RunningSession | None = None
+        # "<profile>: task" or "agent: command" (profile names come from config.json).
+        words = "|".join(re.escape(n) for n in sorted([*cfg.profiles, "agent"], key=len, reverse=True))
+        self.subject_re = re.compile(rf"^\s*({words})\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
         self.settle_seconds = 2.0  # after typing into a session, before reading its screen
 
     # ---- intake: decide what to do with each new task email
@@ -208,7 +207,9 @@ class Relay:
         cutoff = datetime.now() - self.limits.max_age
         # SINCE only takes a date (in Gmail's timezone), so search from the day
         # before and compare exact received times in intake().
-        uids = gmail.search_tasks(self.cfg.allowed_senders, (cutoff - timedelta(days=1)).date())
+        uids = gmail.search_tasks(
+            self.cfg.allowed_senders, (cutoff - timedelta(days=1)).date(), [*self.cfg.profiles, "agent"]
+        )
         new = [u for u in uids if u not in self.seen]
         if not new:
             return
@@ -223,7 +224,7 @@ class Relay:
             return  # too old, or one of our own replies
         subject = str(f.msg.get("Subject", ""))
         reply = REPLY_RE.match(subject)
-        m = SUBJECT_RE.match(subject[reply.end() :] if reply else subject)
+        m = self.subject_re.match(subject[reply.end() :] if reply else subject)
         if not m:
             return  # "claude"/"codex"/"agent" elsewhere in the subject
         tool, title = m.group(1).lower(), m.group(2).strip()
@@ -313,6 +314,14 @@ class Relay:
 
     # ---- agent: commands
 
+    def help_text(self) -> str:
+        names = ", ".join(f"'{n}:'" for n in self.cfg.profiles)
+        return (
+            f"{COMMANDS_HELP}\n\nTasks: '<agent>: <task>', with more detail in the body if needed. "
+            f"Agents (from config.json): {names}.\n"
+            "A new task closes the open session unless it is working (then it queues)."
+        )
+
     def run_command(self, task: Task, body: Callable[[], str] = lambda: "", thread: set[str] | None = None) -> None:
         """Answer an "agent: <command>" email. Commands count towards the flood
         breaker and the reply budget like tasks, but never queue. `thread` holds
@@ -351,10 +360,10 @@ class Relay:
                 task, f"Reply count reset: {used} used, now 0 of {self.limits.reply_budget} for the next 24 hours."
             )
         elif command == "help":
-            self.replier.reply(task, pre(COMMANDS_HELP))
+            self.replier.reply(task, pre(self.help_text()))
         else:
             unknown = f"Unknown command '{command}'." if command else "No command given."
-            self.replier.reply(task, f"{unknown}\n\n{pre(COMMANDS_HELP)}")
+            self.replier.reply(task, f"{unknown}\n\n{pre(self.help_text())}")
 
     def status_text(self) -> str:
         lines = []
@@ -405,9 +414,9 @@ class Relay:
             elif len(word) == 1:
                 steps.append((True, word))
             else:
-                return f"Unknown key '{word}'; nothing was pressed.\n\n{pre(COMMANDS_HELP)}"
+                return f"Unknown key '{word}'; nothing was pressed.\n\n{pre(self.help_text())}"
         if not steps:
-            return f"No keys given.\n\n{pre(COMMANDS_HELP)}"
+            return f"No keys given.\n\n{pre(self.help_text())}"
         return self._send(steps, f"Pressed {spec}.")
 
     def _send(self, steps: list[tuple[bool, str]], done: str) -> str:
@@ -467,17 +476,22 @@ class Relay:
             if self.dry_run:
                 log.info("[dry run] would start %s with prompt:\n%s\n", task.tool, task.prompt)
                 continue
-            exe = self.launcher.find_tool(task.tool)
+            profile = self.cfg.profiles.get(task.tool)
+            if profile is None:  # queued before config.json changed
+                log.error("  No profile '%s' in config.json", task.tool)
+                self.replier.reply(task, f"Couldn't start: there's no '{task.tool}' profile in config.json any more.")
+                continue
+            exe = self.launcher.find_tool(profile.cli)
             if not exe:
-                log.error("  %s not found on PATH", task.tool)
-                self.replier.reply(task, f"Couldn't start: {task.tool} isn't installed or isn't on PATH.")
+                log.error("  %s not found on PATH", profile.cli)
+                self.replier.reply(task, f"Couldn't start: {profile.cli} isn't installed or isn't on PATH.")
                 continue
             folder = self.launcher.new_folder(task.tool)
             (folder / PROMPT_FILE).write_text(task.prompt + "\n")
             relay_dir = folder / RELAY_DIR
             relay_dir.mkdir()
-            extra = (*self.cfg.tool_args.get(task.tool, ()), *hook_args(task.tool, relay_dir))
-            cmd = with_pid_file(build_command(exe, task.tool, extra, prompt_arg(task.prompt)), relay_dir / PID_FILE)
+            extra = (*profile.args, *hook_args(profile.cli, relay_dir))
+            cmd = with_pid_file(build_command(exe, profile.cli, extra, prompt_arg(task.prompt)), relay_dir / PID_FILE)
             watch = FolderWatch(relay_dir)
             proc = self.launcher.open(folder, cmd)
             if not proc:

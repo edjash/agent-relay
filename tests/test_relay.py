@@ -6,7 +6,9 @@ from pathlib import Path
 
 from conftest import FakeLauncher, FakeSMTP, Harness, plain
 
+from agent_relay.config import Profile
 from agent_relay.gmail import REPLY_HEADER
+from agent_relay.relay import Relay
 
 
 def test_task_starts_a_session_and_replies(harness: Harness) -> None:
@@ -37,7 +39,8 @@ def test_task_starts_a_session_and_replies(harness: Harness) -> None:
 
 
 def test_flags_from_settings_go_before_the_prompt(harness: Harness) -> None:
-    harness.relay.cfg = replace(harness.relay.cfg, tool_args={"codex": ("--yolo", "-m", "o3")})
+    profiles = {**harness.relay.cfg.profiles, "codex": Profile("codex", "codex", ("--yolo", "-m", "o3"))}
+    harness.relay.cfg = replace(harness.relay.cfg, profiles=profiles)
     harness.mailbox.add("codex: fix it", "the failing test")
     harness.cycle()
     assert harness.launcher.commands[0][4:10] == [
@@ -687,3 +690,23 @@ def test_a_reply_to_a_reply_still_belongs_to_the_session(harness: Harness) -> No
     harness.cycle()
     assert harness.full_replies[-1].startswith("Pressed enter.")
     assert harness.launcher.sent == [(False, "Enter"), (False, "Enter")]
+
+
+def test_profiles_from_config_json_are_the_subject_words(harness: Harness) -> None:
+    profiles = {"opus": Profile("opus", "claude", ("--model", "opus", "--effort", "max"))}
+    harness.relay = Relay(replace(harness.relay.cfg, profiles=profiles), harness.state, harness.relay.replier,
+                          harness.launcher)  # fmt: skip
+    harness.mailbox.add("Opus: deep research", "on X")
+    harness.mailbox.add("claude: not a profile any more", "x")
+    harness.cycle()
+    search = next(args for cmd, args in harness.mailbox.commands if cmd == "SEARCH")
+    assert search.endswith('OR SUBJECT "agent" SUBJECT "opus"')
+    r = harness.relay.running
+    assert r is not None and r.folder.name.startswith("opus_session_")
+    cmd = harness.launcher.commands[0]
+    assert cmd[4:9] == ["/usr/bin/claude", "--model", "opus", "--effort", "max"]
+    assert "--settings" in cmd  # Claude's hooks, because the profile runs claude
+    assert harness.replies == [f"Started opus in {r.folder}"]
+    harness.mailbox.add("agent: help", "")
+    harness.cycle()
+    assert "Agents (from config.json): 'opus:'." in harness.full_replies[-1]

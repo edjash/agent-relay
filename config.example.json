@@ -1,0 +1,10 @@
+{
+  "claude": {
+    "cli": "claude",
+    "flags": {"dangerously-skip-permissions": true}
+  },
+  "codex": {
+    "cli": "codex",
+    "flags": {"dangerously-bypass-approvals-and-sandbox": true}
+  }
+}
