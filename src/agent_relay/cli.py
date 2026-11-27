@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -19,7 +20,8 @@ from agent_relay.state import AlreadyRunning, State, acquire_lock, lock_holder
 
 log = logging.getLogger("agent_relay")
 
-SERVICE_PATH = Path.home() / ".config/systemd/user/agent-relay.service"
+SERVICE = "agent-relay"
+SERVICE_PATH = Path.home() / f".config/systemd/user/{SERVICE}.service"
 SERVICE_TEMPLATE = """\
 [Unit]
 Description=AgentRelay: start Claude Code / Codex sessions from Gmail
@@ -72,7 +74,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("     https://myaccount.google.com/apppasswords")
     print(f"  2. Edit {path}: set AGENT_RELAY_GMAIL_USER, AGENT_RELAY_APP_PASSWORD and AGENT_RELAY_ALLOWED_SENDERS")
     print("  3. Try it:  agent-relay check --dry-run")
-    print("  4. Run it:  agent-relay run   (or `agent-relay install-service` to run it in the background)")
+    print("  4. Run it:  agent-relay service install   (runs in the background, and at every login)")
     return EXIT_OK
 
 
@@ -152,21 +154,62 @@ def cmd_new(args: argparse.Namespace) -> int:
     return start_interactive(cfg.sessions_dir, profile.cli, profile.args, name=profile.name)
 
 
-def cmd_install_service(args: argparse.Namespace) -> int:
-    exe = shutil.which("agent-relay") or str(Path(sys.argv[0]).resolve())
-    if SERVICE_PATH.exists() and not args.force:
-        print(f"{SERVICE_PATH} already exists (use --force to replace it).", file=sys.stderr)
+def _systemctl(*args: str) -> int:
+    try:
+        return subprocess.run(["systemctl", "--user", *args]).returncode
+    except FileNotFoundError:
+        print("systemctl not found: the service needs systemd.", file=sys.stderr)
         return EXIT_ERROR
+
+
+def _install(force: bool) -> int:
+    if SERVICE_PATH.exists() and not force:
+        print(f"The service is already installed ({SERVICE_PATH}); use --force to rewrite it.", file=sys.stderr)
+        return EXIT_ERROR
+    exe = shutil.which("agent-relay") or str(Path(sys.argv[0]).resolve())
     readme = Path(__file__).resolve().parents[2] / "README.md"
     SERVICE_PATH.parent.mkdir(parents=True, exist_ok=True)
     SERVICE_PATH.write_text(SERVICE_TEMPLATE.format(exe=exe, readme=readme))
-    print(f"Wrote {SERVICE_PATH}\n")
-    print("Start it now and at every login:")
-    print("  systemctl --user daemon-reload")
-    print("  systemctl --user enable --now agent-relay")
-    print("Logs:    journalctl --user -u agent-relay -f")
-    print("Stop:    systemctl --user disable --now agent-relay")
-    return EXIT_OK
+    code = _systemctl("daemon-reload") or _systemctl("enable", "--now", SERVICE)
+    if code == 0:
+        print("Installed and started. It also starts at every login.")
+    return code
+
+
+def _uninstall() -> int:
+    code = _systemctl("disable", "--now", SERVICE)
+    SERVICE_PATH.unlink()
+    code = _systemctl("daemon-reload") or code
+    if code == 0:
+        print("Stopped and removed.")
+    return code
+
+
+def cmd_service(args: argparse.Namespace) -> int:
+    action = args.action
+    if action == "install":
+        return _install(args.force)
+    if not SERVICE_PATH.exists():
+        print("The service isn't installed: run agent-relay service install", file=sys.stderr)
+        return EXIT_ERROR
+    if action == "uninstall":
+        return _uninstall()
+    if action == "status":
+        return _systemctl("status", "--no-pager", SERVICE)
+    if action == "logs":
+        try:
+            return subprocess.run(["journalctl", "--user", "-u", SERVICE, "-n", "50", "-f"]).returncode
+        except FileNotFoundError:
+            print("journalctl not found: the service needs systemd.", file=sys.stderr)
+            return EXIT_ERROR
+    code = _systemctl(action, SERVICE)  # start, stop, restart
+    if code == 0:
+        print(
+            {"start": "Started.", "stop": "Stopped (it starts again at the next login).", "restart": "Restarted."}[
+                action
+            ]
+        )
+    return code
 
 
 # ---------------------------------------------------------------- entry point
@@ -182,11 +225,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init", help="create .env and config.json from their examples").set_defaults(func=cmd_init)
 
-    for name, func, help_text in (
-        ("run", cmd_run, "listen for task emails until stopped"),
-        ("check", cmd_check, "check for task emails once, then exit"),
+    for p, func in (
+        (sub.add_parser("run"), cmd_run),  # what the service runs; not listed, use `service`
+        (sub.add_parser("check", help="check for task emails once, then exit"), cmd_check),
     ):
-        p = sub.add_parser(name, help=help_text)
         p.add_argument("--dry-run", action="store_true", help="show what would happen; start, send and save nothing")
         p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
         p.set_defaults(func=func)
@@ -197,9 +239,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("agent", nargs="?", default="claude", help="a profile from config.json (default: claude)")
     p.set_defaults(func=cmd_new)
 
-    p = sub.add_parser("install-service", help="install a systemd user service that runs the listener")
-    p.add_argument("--force", action="store_true", help="replace an existing service file")
-    p.set_defaults(func=cmd_install_service)
+    p = sub.add_parser("service", help="install, start, stop, restart or remove the background service; see its log")
+    actions = p.add_subparsers(dest="action", metavar="ACTION", required=True)
+    for name, help_text in (
+        ("install", "install the service and start it (it also starts at every login)"),
+        ("start", "start the service"),
+        ("stop", "stop the service until the next login"),
+        ("restart", "restart the service, e.g. after editing .env or config.json"),
+        ("status", "show whether the service is running"),
+        ("logs", "show the service's log as it happens (Ctrl+C to leave)"),
+        ("uninstall", "stop the service and remove it"),
+    ):
+        a = actions.add_parser(name, help=help_text)
+        if name == "install":
+            a.add_argument("--force", action="store_true", help="rewrite the service file if it's already installed")
+    p.set_defaults(func=cmd_service)
     return parser
 
 

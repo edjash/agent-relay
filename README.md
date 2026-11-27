@@ -134,9 +134,9 @@ ln -s "$PWD/.venv/bin/agent-relay" ~/.local/bin/agent-relay
    ```bash
    agent-relay check --dry-run
    ```
-4. Run it in the foreground, or as a background service (below):
+4. Run it in the background (it also starts at every login):
    ```bash
-   agent-relay run
+   agent-relay service install
    ```
 
 ## Commands
@@ -144,34 +144,24 @@ ln -s "$PWD/.venv/bin/agent-relay" ~/.local/bin/agent-relay
 | Command | |
 |---|---|
 | `agent-relay init` | create `.env` from `.env.example` |
-| `agent-relay run [--dry-run] [-v]` | listen until stopped |
 | `agent-relay check [--dry-run] [-v]` | one pass, then exit |
 | `agent-relay status` | listener, current session, queue, replies used |
 | `agent-relay new [claude\|codex]` | start a session by hand in a new session folder |
-| `agent-relay install-service [--force]` | install the systemd user service |
+| `agent-relay service install [--force]` | install the background service and start it |
+| `agent-relay service start\|stop\|restart` | control it (restart after editing `.env` or `config.json`) |
+| `agent-relay service status\|logs` | is it running; its log as it happens |
+| `agent-relay service uninstall` | stop it and remove it |
 
 Only one listener can run at a time (an OS file lock, released automatically even if it crashes).
 
-## Run as a background service
+## The background service
 
-```bash
-agent-relay install-service
-systemctl --user daemon-reload
-systemctl --user enable --now agent-relay
-journalctl --user -u agent-relay -f     # logs
-```
-
-To stop it, or remove it completely:
-
-```bash
-systemctl --user stop agent-relay                   # stop until the next login
-systemctl --user disable --now agent-relay          # stop and don't start at login
-rm ~/.config/systemd/user/agent-relay.service       # then remove the service...
-systemctl --user daemon-reload                      # ...and tell systemd it's gone
-```
+`agent-relay service install` installs a systemd user service and starts it. `stop` stops it until the next
+login; `uninstall` stops it and removes it.
 
 It starts with your desktop session and restarts after a crash. Problems a restart can't fix (bad settings,
-wrong password, already running) exit with code 2 and the service stays stopped.
+wrong password, already running) exit with code 2 and the service stays stopped: `agent-relay service logs`
+says why. The service runs `agent-relay run`, which you can also run in a terminal to watch it directly.
 
 ## Configuration
 

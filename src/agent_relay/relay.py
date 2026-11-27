@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -701,6 +702,14 @@ def _backoff_messages(error: imaplib.IMAP4.error) -> tuple[bool, bool]:
     return any(m in text for m in LOGIN_FAILURE_MARKERS), any(m in text for m in GMAIL_BACKOFF_MARKERS)
 
 
+class StopRequested(Exception):
+    """SIGTERM arrived: what systemd sends to stop the service."""
+
+
+def _on_sigterm(signum: int, frame: object) -> None:
+    raise StopRequested
+
+
 def run(
     relay: Relay,
     *,
@@ -712,7 +721,10 @@ def run(
     """Listen until interrupted (or one pass with once=True). Returns an exit code."""
     cfg = relay.cfg
     retry = RETRY_MIN
+    failures = 0  # in a row, to say when the connection is back
     relay.mark_started()
+    in_main_thread = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGTERM, _on_sigterm) if in_main_thread else None
     try:
         while True:
             connected_at: float | None = None
@@ -720,6 +732,9 @@ def run(
             try:
                 with connect(cfg.gmail_user, cfg.app_password) as gmail:
                     connected_at = clock()
+                    if failures:
+                        log.info("Reconnected after %d failed attempt%s", failures, "" if failures == 1 else "s")
+                        failures = 0
                     while True:
                         relay.finish_session_if_closed()
                         relay.check_started()
@@ -747,8 +762,17 @@ def run(
                 retry = RETRY_MAX
             elif connected_at is not None and clock() - connected_at >= HEALTHY_AFTER:
                 retry = RETRY_MIN  # the connection had been fine for a while
+            failures += 1
             log.warning("%s; reconnecting in %dm %ds", problem, retry // 60, retry % 60)
             sleep(retry)
             retry = min(retry * 2, RETRY_MAX)
+    except StopRequested:
+        log.info("Stopped (asked to by the system)")
+        return EXIT_OK
+    except KeyboardInterrupt:
+        log.info("Stopped (Ctrl+C)")
+        return EXIT_OK
     finally:
+        if in_main_thread:
+            signal.signal(signal.SIGTERM, previous)
         relay.mark_stopped()

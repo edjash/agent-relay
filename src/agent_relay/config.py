@@ -80,11 +80,19 @@ PROFILES_TEMPLATE = """\
 {
   "claude": {
     "cli": "claude",
-    "flags": {"dangerously-skip-permissions": true}
+    "flags": {
+      "dangerously-skip-permissions": true,
+      "model": "opus",
+      "effort": "high"
+    }
   },
   "codex": {
     "cli": "codex",
-    "flags": {"dangerously-bypass-approvals-and-sandbox": true}
+    "flags": {
+      "dangerously-bypass-approvals-and-sandbox": true,
+      "model": "gpt-6.2-sol",
+      "c": "model_reasoning_effort=high"
+    }
   }
 }
 """

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import timedelta
 from pathlib import Path
 
@@ -86,8 +87,20 @@ def test_template_defaults_load(paths: Path) -> None:
     cfg = load(write_template(paths / ".env"), require_gmail=False)
     assert cfg.sessions_dir == Path.home() / "agent-relay/sessions"
     assert cfg.profiles == {
-        "claude": config.Profile("claude", "claude", ("--dangerously-skip-permissions",)),
-        "codex": config.Profile("codex", "codex", ("--dangerously-bypass-approvals-and-sandbox",)),
+        "claude": config.Profile(
+            "claude", "claude", ("--dangerously-skip-permissions", "--model", "opus", "--effort", "high")
+        ),
+        "codex": config.Profile(
+            "codex",
+            "codex",
+            (
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-6.2-sol",
+                "-c",
+                "model_reasoning_effort=high",
+            ),
+        ),
     }
     assert cfg.limits == config.Limits()
     assert cfg.log_file is None
@@ -191,8 +204,50 @@ def test_cli_status_without_listener(paths: Path, capsys: pytest.CaptureFixture[
 def test_cli_without_a_command_shows_the_commands(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main([]) == 1
     out = capsys.readouterr().out
-    for command in ("init", "run", "check", "status", "new", "install-service"):
+    for command in ("init", "check", "status", "new", "service"):
         assert command in out
+    assert "run " not in out  # what the service runs; not listed
+
+
+@pytest.fixture
+def systemctl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> subprocess.CompletedProcess[bytes]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(cli, "SERVICE_PATH", tmp_path / "agent-relay.service")
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    return calls
+
+
+def test_service_install_starts_it_and_uninstall_removes_it(
+    systemctl: list[list[str]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["service", "install"]) == 0
+    assert "ExecStart=" in cli.SERVICE_PATH.read_text()
+    assert systemctl == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", "--now", "agent-relay"],
+    ]
+    assert cli.main(["service", "install"]) == 1  # already installed
+    assert "--force" in capsys.readouterr().err
+    systemctl.clear()
+    assert cli.main(["service", "restart"]) == 0
+    assert cli.main(["service", "uninstall"]) == 0
+    assert not cli.SERVICE_PATH.exists()
+    assert systemctl == [
+        ["systemctl", "--user", "restart", "agent-relay"],
+        ["systemctl", "--user", "disable", "--now", "agent-relay"],
+        ["systemctl", "--user", "daemon-reload"],
+    ]
+
+
+def test_service_commands_need_it_installed(systemctl: list[list[str]], capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["service", "start"]) == 1
+    assert "run agent-relay service install" in capsys.readouterr().err
+    assert systemctl == []
 
 
 def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:

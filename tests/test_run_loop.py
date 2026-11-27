@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import imaplib
+import logging
+import os
+import signal
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import pytest
 from conftest import Harness
 
 from agent_relay.gmail import Gmail
@@ -67,3 +71,36 @@ def test_once_returns_after_one_pass(harness: Harness) -> None:
     assert run(harness.relay, once=True, connect=connect) == EXIT_OK
     assert harness.relay.running is not None
     assert harness.state.listener == {}  # cleared on exit for `status`
+
+
+def test_a_reconnect_is_logged(harness: Harness, caplog: pytest.LogCaptureFixture) -> None:
+    clock = Clock()
+    events: list[object] = [OSError("no network")] * 3 + [5]
+    events += [imaplib.IMAP4.error("[AUTHENTICATIONFAILED] Invalid credentials (Failure)")]
+    caplog.set_level(logging.INFO, "agent_relay")
+    run(harness.relay, connect=scripted_connect(events, clock, harness), sleep=clock.sleep, clock=clock)
+    assert "Reconnected after 3 failed attempts" in caplog.messages
+
+
+def test_sigterm_stops_cleanly_and_says_so(harness: Harness, caplog: pytest.LogCaptureFixture) -> None:
+    closed = []
+
+    @contextmanager
+    def connect(user: str, password: str) -> Iterator[Gmail]:
+        class Stopped(Gmail):
+            def search_tasks(self, *args: object) -> list[str]:
+                os.kill(os.getpid(), signal.SIGTERM)  # what `systemctl stop` sends
+                return []
+
+        try:
+            yield Stopped(harness.mailbox)  # type: ignore[arg-type]
+        finally:
+            closed.append(True)
+
+    before = signal.getsignal(signal.SIGTERM)
+    caplog.set_level(logging.INFO, "agent_relay")
+    assert run(harness.relay, connect=connect) == EXIT_OK
+    assert closed == [True]  # the IMAP connection was closed
+    assert "Stopped (asked to by the system)" in caplog.messages
+    assert harness.state.listener == {}
+    assert signal.getsignal(signal.SIGTERM) == before
