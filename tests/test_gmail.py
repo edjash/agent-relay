@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import date
+from typing import ClassVar
 
 import pytest
 
@@ -103,3 +104,31 @@ def test_imap_date_is_english_whatever_the_locale() -> None:
 def test_sender_terms() -> None:
     assert sender_terms({"a@x"}) == 'FROM "a@x"'
     assert sender_terms({"a@x", "b@x", "c@x"}) == 'OR OR FROM "a@x" FROM "b@x" FROM "c@x"'
+
+
+class RecordingIMAP:
+    calls: ClassVar[list[str]] = []
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        RecordingIMAP.calls = []
+
+    def login(self, user: str, password: str) -> None:
+        pass
+
+    def logout(self) -> None:
+        RecordingIMAP.calls.append("logout")
+
+    def shutdown(self) -> None:
+        RecordingIMAP.calls.append("shutdown")
+
+
+def test_stopping_mid_idle_closes_at_once_instead_of_logging_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In IDLE, Gmail never answers LOGOUT, so a polite logout hung `service stop`
+    until systemd killed the listener 90 seconds later."""
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", RecordingIMAP)
+    with pytest.raises(KeyboardInterrupt), Gmail.connect("u", "p"):
+        raise KeyboardInterrupt
+    assert RecordingIMAP.calls == ["shutdown"]
+    with Gmail.connect("u", "p"):
+        pass
+    assert RecordingIMAP.calls == ["logout"]  # a normal exit still logs out

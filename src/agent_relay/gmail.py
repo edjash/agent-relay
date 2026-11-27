@@ -7,8 +7,8 @@ import imaplib
 import re
 import select
 import time
-from collections.abc import Collection, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Collection, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import date, datetime
 from email import policy
@@ -59,6 +59,11 @@ def subject_terms(words: Collection[str]) -> str:
     return _any_of([f'SUBJECT "{w}"' for w in sorted(words)])
 
 
+def _quietly(close: Callable[[], object]) -> None:
+    with suppress(OSError, imaplib.IMAP4.error):
+        close()
+
+
 class Gmail:
     def __init__(self, imap: imaplib.IMAP4):
         self.imap = imap
@@ -66,9 +71,16 @@ class Gmail:
     @staticmethod
     @contextmanager
     def connect(user: str, password: str) -> Iterator[Gmail]:
-        with imaplib.IMAP4_SSL(IMAP_HOST, timeout=NETWORK_TIMEOUT) as imap:
+        imap = imaplib.IMAP4_SSL(IMAP_HOST, timeout=NETWORK_TIMEOUT)
+        try:
             imap.login(user, password)
             yield Gmail(imap)
+        except BaseException:
+            # Stopped or failed mid-command, usually in IDLE, where Gmail would
+            # never answer a LOGOUT: close the connection instead of waiting.
+            _quietly(imap.shutdown)
+            raise
+        _quietly(imap.logout)
 
     def search_tasks(self, senders: Collection[str], since: date, words: Collection[str]) -> list[str]:
         """UIDs of inbox mail from the senders, with one of the words (profile
